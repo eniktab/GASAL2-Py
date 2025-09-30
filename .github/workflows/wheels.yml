@@ -16,7 +16,7 @@ permissions:
 
 env:
   PACKAGE_NAME: gasal2_py
-  # Build these CPython versions
+  # Build these CPython versions (linux x86_64)
   PYTHON_BUILD_PATS: "cp39-* cp310-* cp311-* cp312-*"
 
 jobs:
@@ -43,9 +43,9 @@ jobs:
           python - <<'PY'
           import subprocess, pathlib, os
           try:
-              import tomllib  # Python >=3.11
+              import tomllib  # py>=3.11
           except Exception:
-              import tomli as tomllib  # fallback if needed
+              import tomli as tomllib
 
           cur = tomllib.loads(pathlib.Path("pyproject.toml").read_bytes()).get("project",{}).get("version","")
           try:
@@ -92,14 +92,14 @@ jobs:
           ARG BASE
           ARG CUDA_FROM
           FROM ${CUDA_FROM} as cuda
-          # provide /usr/local/cuda
+          # provides /usr/local/cuda
 
           FROM ${BASE}
-          # install a minimal VCS; package manager differs by base image
+          # minimal tools; pkg manager differs per base
           RUN yum -y install git && yum clean all || true \
            || (microdnf -y install git && microdnf clean all || true) \
            || (dnf -y install git && dnf clean all || true)
-          # copy CUDA toolkit into a neutral prefix
+          # copy CUDA to neutral prefix
           COPY --from=cuda /usr/local/cuda /opt/cuda
           ENV PATH="/opt/cuda/bin:${PATH}" CUDA_HOME="/opt/cuda"
           DOCKER
@@ -191,7 +191,7 @@ jobs:
     name: Publish to PyPI (optional)
     runs-on: ubuntu-latest
     needs: release
-    # Only gate on the version change here; the secret check is step-level
+    # Gate on version change; token check handled in-step via env
     if: needs.version-check.outputs.changed == 'true'
     steps:
       - uses: actions/download-artifact@v4
@@ -203,15 +203,19 @@ jobs:
           mkdir -p to-publish
           find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-publish/ \;
 
-      - name: Publish
-        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+      - name: Publish (if token present)
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        if: ${{ env.PYPI_API_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@v1.12.2
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          password: ${{ env.PYPI_API_TOKEN }}
           packages_dir: to-publish
           skip_existing: true
 
       - name: Skip publish (no PYPI_API_TOKEN)
-        if: ${{ secrets.PYPI_API_TOKEN == '' }}
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        if: ${{ env.PYPI_API_TOKEN == '' }}
         run: echo "PYPI_API_TOKEN not set; skipping PyPI publish."
 

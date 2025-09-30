@@ -1,0 +1,5 @@
+README.md
+pyproject.toml
+CMakeLists.txt
+src/gasalwrap/__init__.py
+src/gasalwrap/gasal_py.cpp

@@ -1,4 +1,0 @@
-include README.md
-recursive-include include *
-recursive-include lib *        # (optional if you want to ship the .a too)
-

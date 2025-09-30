@@ -34,4 +34,3 @@ CMAKE_BUILD_TYPE = "Release"
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-xdist>=3", "pytest-timeout>=2"]
 
-

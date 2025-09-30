@@ -12,14 +12,10 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write    # create tags/releases
-  actions: read
+  contents: write
 
 env:
   PACKAGE_NAME: gasal2_py
-  # Adjust CUDA versions if you update images below.
-  CUDA_ML2014_IMAGE: "gasal2-manylinux2014-cuda:12.4.0"
-  CUDA_ML228_IMAGE:  "gasal2-manylinux_2_28-cuda:12.4.1"
   PYTHON_BUILD_VERS: "cp39 cp310 cp311 cp312"
 
 jobs:
@@ -39,20 +35,18 @@ jobs:
         id: vout
         run: |
           python - <<'PY'
-          import sys, subprocess, tomllib, pathlib
-          pj = pathlib.Path("pyproject.toml").read_bytes()
-          cur = tomllib.loads(pj).get("project", {}).get("version", "")
+          import subprocess, tomllib, pathlib, os
+          cur = tomllib.loads(pathlib.Path("pyproject.toml").read_bytes()).get("project",{}).get("version","")
           try:
               prev_bytes = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
               prev = tomllib.loads(prev_bytes).get("project",{}).get("version","")
           except Exception:
               prev = ""
           changed = "true" if (cur and cur != prev) else "false"
-          print(f"cur={cur} prev={prev} changed={changed}")
-          # set outputs
-          print(f"::set-output name=version::{cur}")
-          print(f"::set-output name=prev_version::{prev}")
-          print(f"::set-output name=changed::{changed}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={cur}\n")
+              fh.write(f"prev_version={prev}\n")
+              fh.write(f"changed={changed}\n")
           PY
 
   build-linux:
@@ -64,12 +58,12 @@ jobs:
       matrix:
         ml_image:
           - kind: manylinux2014
-            tag: ${{ env.CUDA_ML2014_IMAGE }}
-            base: quay.io/pypa/manylinux2014_x86_64
+            tag: "gasal2-manylinux2014-cuda:12.4.0"          # <- literals (no env here)
+            base: "quay.io/pypa/manylinux2014_x86_64"
             cuda_from: "nvidia/cuda:12.4.0-devel-centos7"
           - kind: manylinux_2_28
-            tag: ${{ env.CUDA_ML228_IMAGE }}
-            base: quay.io/pypa/manylinux_2_28_x86_64
+            tag: "gasal2-manylinux_2_28-cuda:12.4.1"        # <- literals (no env here)
+            base: "quay.io/pypa/manylinux_2_28_x86_64"
             cuda_from: "nvidia/cuda:12.4.1-devel-rockylinux8"
     steps:
       - uses: actions/checkout@v4
@@ -85,17 +79,13 @@ jobs:
           ARG BASE
           ARG CUDA_FROM
           FROM ${CUDA_FROM} as cuda
-          # cuda stage just provides /usr/local/cuda
 
           FROM ${BASE}
-          # Minimal build deps for auditwheel/cmake/ninja inside cibuildwheel runner
           RUN yum -y install git && yum clean all || true \
            || (microdnf -y install git && microdnf clean all || true) \
            || (dnf -y install git && dnf clean all || true)
-          # copy CUDA into /opt/cuda ; don't modify ldconfig here (auditwheel will handle RPATHs)
           COPY --from=cuda /usr/local/cuda /opt/cuda
-          ENV PATH="/opt/cuda/bin:${PATH}" \
-              CUDA_HOME="/opt/cuda"
+          ENV PATH="/opt/cuda/bin:${PATH}" CUDA_HOME="/opt/cuda"
           DOCKER
           docker build \
             --build-arg BASE=${{ matrix.ml_image.base }} \
@@ -110,29 +100,22 @@ jobs:
 
       - name: Build wheels with cibuildwheel on ${{ matrix.ml_image.kind }}
         env:
-          # Tell cibuildwheel to use our custom image
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.ml_image.tag }}
-          # Limit to CPythons we want
           CIBW_BUILD: ${{ env.PYTHON_BUILD_VERS }}-manylinux_x86_64
-          # Avoid musllinux for CUDA (Jetson/ARM not targeted here)
           CIBW_SKIP: "pp* *-musllinux_*"
-          # Ensure build tools avail inside containers
           CIBW_BEFORE_BUILD: "python -m pip install -U pip cmake>=3.27 ninja>=1.11"
-          # Pass CUDA location to your CMake via your documented knob
           CIBW_ENVIRONMENT: >
             CMAKE_ARGS="-DGASAL2_CUDA_HOME=/opt/cuda"
-          # Be chatty enough to debug
           CIBW_BUILD_VERBOSITY: "1"
-          # Repair produced wheels; exclude libcuda.so.1 (provided by driver)
+          # If your auditwheel is new enough to support --exclude; if not, drop it.
           CIBW_REPAIR_WHEEL_COMMAND: >
             auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1
         run: |
           python -m cibuildwheel --output-dir wheelhouse
 
-      - name: Build sdist (source tarball)
+      - name: Build sdist
         run: |
           python -m build --sdist --outdir dist
-          ls -l dist/ wheelhouse/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -152,16 +135,18 @@ jobs:
         with:
           path: ./artifacts
 
-      - name: Generate release notes
-        id: rn
+      - name: Flatten artifacts for release/publish
         run: |
-          echo "GASAL2-Py v${{ needs.version-check.outputs.version }}" > RELEASE_NOTES.txt
-          echo "" >> RELEASE_NOTES.txt
-          echo "• CUDA-enabled manylinux wheels (2014 & 2_28)" >> RELEASE_NOTES.txt
-          echo "• Built from commit ${GITHUB_SHA}" >> RELEASE_NOTES.txt
+          mkdir -p to-release
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-release/ \;
+          ls -l to-release
 
       - name: Create tag
         run: |
+          git fetch --tags || true
+          if git rev-parse "v${{ needs.version-check.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag already exists; skipping"; exit 0
+          fi
           git tag "v${{ needs.version-check.outputs.version }}"
           git push origin "v${{ needs.version-check.outputs.version }}"
 
@@ -170,10 +155,10 @@ jobs:
         with:
           tag_name: v${{ needs.version-check.outputs.version }}
           name: GASAL2-Py v${{ needs.version-check.outputs.version }}
-          body_path: RELEASE_NOTES.txt
-          files: |
-            artifacts/**/**/*.whl
-            artifacts/**/**/*.tar.gz
+          body: |
+            CUDA-enabled manylinux wheels (2014 & 2_28).
+            Built from commit ${{ github.sha }}.
+          files: to-release/*
 
   publish-pypi:
     name: Publish to PyPI (optional)
@@ -187,10 +172,15 @@ jobs:
         with:
           path: ./artifacts
 
+      - name: Collect distributions
+        run: |
+          mkdir -p to-publish
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-publish/ \;
+
       - name: Publish
         uses: pypa/gh-action-pypi-publish@v1.12.2
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
-          packages_dir: artifacts
+          packages_dir: to-publish
           skip_existing: true
 

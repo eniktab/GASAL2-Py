@@ -44,15 +44,13 @@ jobs:
           python - <<'PY'
           import subprocess, pathlib, os
           try:
-              import tomllib  # Python 3.11+
+              import tomllib
           except Exception:
               import tomli as tomllib
 
-          # Read current pyproject as TEXT
           cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
           cur = tomllib.loads(cur_text).get("project", {}).get("version", "")
 
-          # Read previous pyproject (if exists) as TEXT
           try:
               prev_bytes = subprocess.check_output(["git", "show", "HEAD^:pyproject.toml"])
               prev_text = prev_bytes.decode("utf-8", errors="replace")
@@ -135,16 +133,29 @@ jobs:
           CIBW_BUILD: ${{ env.PYTHON_BUILD_PATS }}
           # Skip PyPy and musllinux in this CUDA workflow
           CIBW_SKIP: "pp* *-musllinux_*"
-          # Ensure cmake/ninja are available inside the container
-          CIBW_BEFORE_BUILD: "python -m pip install -U pip cmake>=3.27 ninja>=1.11"
-          # Pass CUDA location to your CMake (adjust if your build expects different var)
+          # Ensure build deps are available inside the container's PEP 517 env
+          CIBW_BEFORE_BUILD: >
+            python -m pip install -U pip
+            cmake>=3.27
+            ninja>=1.11
+            scikit-build-core>=0.10
+            pybind11>=2.12
+          # CUDA discovery + both lib paths (CUDA 12 layout)
           CIBW_ENVIRONMENT: >
-            CMAKE_ARGS="-DGASAL2_CUDA_HOME=/opt/cuda"
-          # Be reasonably verbose
-          CIBW_BUILD_VERBOSITY: "1"
-          # Repair produced wheels; exclude libcuda driver from bundling
+            CMAKE_ARGS="-DGASAL2_CUDA_HOME=/opt/cuda
+                        -DCUDAToolkit_ROOT=/opt/cuda
+                        -DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda
+                        -DGASAL2_GPU_SM_ARCH=sm_80"
+            CUDA_HOME=/opt/cuda
+            CUDA_PATH=/opt/cuda
+            CMAKE_PREFIX_PATH=/opt/cuda
+            LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+          # Be verbose so failures provide CMake diagnostics
+          CIBW_BUILD_VERBOSITY: "3"
+          # Ensure auditwheel sees libcudart in the repair phase (prefix with LD_LIBRARY_PATH)
           CIBW_REPAIR_WHEEL_COMMAND: >
-            auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1
+            bash -lc 'export LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH;
+                      auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1'
         run: |
           python -m cibuildwheel --output-dir wheelhouse
 
@@ -200,7 +211,6 @@ jobs:
     name: Publish to PyPI (optional)
     runs-on: ubuntu-latest
     needs: release
-    # Gate on version change; token check handled in-step via env
     if: needs.version-check.outputs.changed == 'true'
     steps:
       - uses: actions/download-artifact@v4

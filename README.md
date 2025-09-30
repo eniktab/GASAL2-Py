@@ -1,26 +1,40 @@
-# GASAL2‑Py
+# GASAL2‑Py — Fast GPU Semi‑Global Alignment with Python Bindings
 
-Python bindings and helper utilities for [GASAL2], a GPU‑accelerated pairwise alignment library.
+**GASAL2‑Py** provides Python bindings and build helpers for **[GASAL2]**, a CUDA‑accelerated pairwise aligner.
+This repo includes a minimal reproducible GASAL2 build (static + shared) **and** a high‑performance Pybind11
+extension with double‑buffered CUDA streams and optional OpenMP post‑processing.
 
-This README covers install/build options and **opt‑in testing** (pytest via CTest) you can trigger after or during the CMake build.
+> The provided code is include **asynchronous GPU
+> pipelining (ping‑pong buffering)**, correct **8‑byte ASCII buffer alignment** for H2D copies, and **OpenMP
+> parallelization** for host‑side CIGAR coalescing.
+
+---
+
+> CUDA is supported on Linux and Windows. macOS is not supported by NVIDIA CUDA.
 
 ---
 
 ## Requirements
 
-- **CUDA Toolkit** (matching your NVIDIA driver)
-- **CMake ≥ 3.20** (3.27+ recommended) and a build tool (e.g., Ninja)
-- **Python ≥ 3.8** with `pip`
-- **gcc/g++** compatible with your CUDA Toolkit
-- Optional for tests: `pytest`
+- **CUDA Toolkit** matching your NVIDIA driver (12.x recommended)
+- **Python ≥ 3.8**, `pip`
+- One of:
+  - **CMake ≥ 3.20** (3.27+ recommended) and a build tool (e.g., Ninja), or
+  - System **g++/clang++** and **pybind11** for the manual build path
+- Optional: **OpenMP** (GCC/Clang: `-fopenmp`; MSVC: `/openmp`)
+- Optional: **pytest** for tests
 
-> Tip: On Linux, ensure `nvcc --version` and `nvidia-smi` both work before building.
+Quick sanity check:
+```bash
+nvcc --version
+nvidia-smi
+```
 
 ---
 
-## Quick start (pip)
+## Quick Start (pip / CMake build)
 
-If wheels are not available for your platform, `pip` will build from source.
+If wheels are not available for your platform, `pip` will build from source using CMake.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -29,51 +43,20 @@ pip install .
 ```
 
 Verify import:
-
 ```bash
 python -c "import gasal2; print('GASAL2-Py OK:', gasal2.__version__)"
 ```
 
----
+### Run tests (optional)
 
-## Build from source with CMake
-
-If you prefer an explicit CMake build (e.g., for CI or local dev):
-
+A) **pytest directly** (after editable install):
 ```bash
-# From repo root
-mkdir -p build && cd build
-cmake -S .. -B . -G "Ninja" -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j
+python -m pip install -U pytest
+pip install -e .
+pytest -q -s
 ```
 
-Install (optional):
-
-```bash
-cmake --install .
-```
-
-> You can pass CUDA/toolchain hints, e.g. `-DCMAKE_CUDA_ARCHITECTURES=80` or `-DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12` if needed.
-
----
-
-## Running tests
-
-You can run the Python test suite with **pytest directly**, or via **CMake/CTest** without installing the package.
-
-### A) Run tests after a pip build
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-python -m pip install -U pip "cmake>=3.27" "ninja>=1.11" pytest
-pip install -e .           # or: pip install .
-pytest -q -s                  # discovers and runs tests/ with pytest
-```
-
-### B) Run tests with CMake/CTest (no install needed)
-
-Enable tests at configure time and run them via `ctest`:
-
+B) **CTest without installing**:
 ```bash
 mkdir -p build && cd build
 cmake -S .. -B . -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DGASAL2_ENABLE_TESTS=ON
@@ -81,38 +64,121 @@ cmake --build . -j
 ctest --output-on-failure -C Release
 ```
 
-This adds the build tree to `PYTHONPATH` so the compiled extension can be imported by the tests without `cmake --install`.
-
-### C) Run tests automatically after the build (opt‑in)
-
-If you want a **post‑build** test step (useful for CI or local dev), also pass:
-
+C) **Post‑build tests** on `check` target:
 ```bash
-cmake -S .. -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release \
-      -DGASAL2_ENABLE_TESTS=ON -DGASAL2_TEST_AFTER_BUILD=ON
+cmake -S .. -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release       -DGASAL2_ENABLE_TESTS=ON -DGASAL2_TEST_AFTER_BUILD=ON
 cmake --build build --target check -j
 ```
 
-This defines a `check` target that invokes `ctest --output-on-failure` after building.
+---
+
+## Manual Build (Makefile + Pybind11)
+
+This repo also provides a minimal **GASAL2** build and a **Pybind11** extension for low‑level users.
+
+### 1) Set CUDA
+
+```bash
+export CUDA_HOME=/apps/cuda/12.9.0   # adjust to your toolkit path
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+```
+
+If present, configure helpers:
+```bash
+make clean || true
+./configure.sh "$CUDA_HOME"
+```
+
+### 2) Choose GPU SM architecture
+
+Use one of: `sm_70, sm_75, sm_80, sm_86, sm_89, sm_90` (e.g., V100/T4/A100/RTX40/H100).
+
+```bash
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+# map 8.0 -> sm_80, 8.9 -> sm_89, 9.0 -> sm_90, etc.
+```
+
+### 3) Build GASAL2
+
+Common knobs:
+- `GPU_SM_ARCH`: e.g., `sm_80`
+- `MAX_QUERY_LEN`: compile‑time bound for buffers (e.g., `4096`)
+- `N_CODE`: ASCII code for ambiguous base `'N'` (`0x4E` for uppercase `N`)
+- optional `N_PENALTY` define if you penalize matches involving `N`
+
+```bash
+make clean || true
+./configure.sh "$CUDA_HOME"
+make GPU_SM_ARCH=sm_80 MAX_QUERY_LEN=4096 N_CODE=0x4E
+# artifacts: ./lib/libgasal.{a,so}, headers in ./include/
+```
+
+### 4) Build the Pybind11 module
+
+```bash
+python -m pip install pybind11
+c++ -O3 -std=c++17 -shared -fPIC gasal_py.cpp   -I./include $(python -m pybind11 --includes)   -L./lib -lgasal -lcudart   -Wl,-rpath,'$ORIGIN/lib'   -fopenmp   -o gasalwrap$(python -c "import sysconfig;print(sysconfig.get_config_var('EXT_SUFFIX'))")
+```
+
+- Keep `-Wl,-rpath,'$ORIGIN/lib'` so `libgasal.so` is found at runtime.
+- Drop `-fopenmp` if you do not want OpenMP CIGAR coalescing.
+
+Verify:
+```bash
+python -c "import gasalwrap; print('ok:', gasalwrap)"
+```
 
 ---
 
-## Configuration options (CMake)
+## Minimal Example
 
-- `-DGASAL2_ENABLE_TESTS=ON` – enable CTest targets to run Python tests
-- `-DGASAL2_TEST_AFTER_BUILD=ON` – add a `check` target that runs tests post‑build
-- `-DCMAKE_CUDA_ARCHITECTURES=<archs>` – e.g., `70;75;80`
-- `-DCMAKE_BUILD_TYPE=Release|RelWithDebInfo|Debug`
-- Toolchain overrides: `-DCMAKE_C_COMPILER`, `-DCMAKE_CXX_COMPILER`
+```python
+# After either build path:
+# match=+2, mismatch=-3, gap_open=-5, gap_extend=-1
+import gasalwrap
+
+aln = gasalwrap.GasalAligner(2, -3, -5, -1, max_q=2048, max_t=8192, max_batch=1024)
+
+q = "AAACTGNNNTTT"
+s = "AAACTGTTTTTT"
+
+res = aln.align(q, s)
+print("score:", res.score)
+print("q:", res.q_beg, res.q_end, "s:", res.s_beg, res.s_end)
+print("ops:", list(res.ops))
+print("lens:", list(res.lens))
+```
+
+If you see plausible coordinates and nonempty `ops/lens`, the CUDA pipeline and host‑side post‑processing are working.
 
 ---
 
 ## Troubleshooting
 
-- **CUDA toolkit/driver mismatch**: align your `nvcc` version with the installed driver. Reconfigure the build after fixing your environment.
-- **Can’t import in tests**: when using CTest, we inject `PYTHONPATH=${CMAKE_BINARY_DIR}`; if you changed target names or layout, update that path in `CMakeLists.txt`.
-- **Link errors to CUDA libs**: ensure `LD_LIBRARY_PATH` (Linux) includes your CUDA lib directory or that rpaths are set correctly.
-- **Multiple Python versions**: the build uses the interpreter selected by `pip`/CMake; activate the intended virtualenv first.
+- **`nvcc: command not found`** — set `CUDA_HOME` and update `PATH`.
+- **`undefined reference to cudart`** — ensure `LD_LIBRARY_PATH=$CUDA_HOME/lib64` or use the rpath as shown.
+- **`actual_target_batch_bytes=… not a multiple of 8`** — use the provided wrapper (it pads H2D sizes to 8‑byte boundaries).
+- **Wrong `GPU_SM_ARCH`** — rebuild `libgasal` for your exact GPU.
+- **No OpenMP** — remove `-fopenmp` (GCC/Clang) or `/openmp` (MSVC) or install a compiler with OpenMP.
+
+---
+
+## Configuration Reference (CMake)
+
+- `-DGASAL2_ENABLE_TESTS=ON` — enable CTest targets to run Python tests
+- `-DGASAL2_TEST_AFTER_BUILD=ON` — adds a `check` target that runs tests post‑build
+- `-DCMAKE_CUDA_ARCHITECTURES=<archs>` — e.g., `70;75;80`
+- `-DCMAKE_BUILD_TYPE=Release|RelWithDebInfo|Debug`
+- Toolchain overrides: `-DCMAKE_C_COMPILER`, `-DCMAKE_CXX_COMPILER`
+
+---
+
+## Versioning & Compatibility
+
+- Wrapper assumes **semi‑global alignment with traceback** is enabled in GASAL2.
+- CUDA 12.x generally requires an R545+ NVIDIA driver (check your distro).
+- When upgrading CUDA, **rebuild** both GASAL2 and the Python extension.
 
 ---
 
@@ -120,3 +186,4 @@ This defines a `check` target that invokes `ctest --output-on-failure` after bui
 
 See `LICENSE` in this repository.
 
+[GASAL2]: https://github.com/ixxi-dante/gasal2

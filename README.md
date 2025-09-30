@@ -5,14 +5,12 @@
 
 > **Description**  
 > This project provides Python bindings for **GASAL2** (GPU-accelerated sequence alignment).  
-> Repository (upstream): https://github.com/nahmedraja/GASAL2  
->
+> If the PyPI wheel does not work on your system, clone and **build from source** here: https://github.com/eniktab/GASAL2-Py
+
 > **Note on installation:** Because GASAL2 relies on NVIDIA CUDA libraries, **many users will need to build from source**. Prebuilt wheels on PyPI may not work on all systems (e.g., due to CUDA version/driver/toolkit mismatches or unsupported platform tags). Ensure you have a compatible CUDA Toolkit/driver installed and accessible on your build machine.
 
 
 
-
-> If the PyPI wheel does not work on your system, clone and **build from source** here: https://github.com/eniktab/GASAL2-Py
 **GASAL2‑Py** provides Python bindings and build helpers for **[GASAL2]**, a CUDA‑accelerated pairwise aligner.
 This repo includes a minimal reproducible GASAL2 build (static + shared) **and** a high‑performance Pybind11
 extension with double‑buffered CUDA streams and optional OpenMP post‑processing.

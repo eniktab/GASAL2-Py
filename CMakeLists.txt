@@ -167,3 +167,35 @@ set_target_properties(_gasal2 PROPERTIES
 # Install the extension into the package
 install(TARGETS _gasal2 DESTINATION gasal2)
 
+option(GASAL2_ENABLE_TESTS "Enable CTest targets to run Python tests" OFF)
+option(GASAL2_TEST_AFTER_BUILD "Add 'check' target to run tests after build" OFF)
+
+if (GASAL2_ENABLE_TESTS)
+  include(CTest)
+  enable_testing()
+
+  # Find Python to drive pytest
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+  # Expose build outputs to Python without install
+  set(_PY_ENV "PYTHONPATH=${CMAKE_BINARY_DIR}:$ENV{PYTHONPATH}")
+
+  # Single ctest entry that runs all pytest tests in ./tests
+  add_test(
+    NAME python_pytest
+    COMMAND ${Python3_EXECUTABLE} -m pytest -q
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(python_pytest PROPERTIES ENVIRONMENT "${_PY_ENV}")
+
+  # Optional post-build 'check' target (handy for CI or local dev)
+  if (GASAL2_TEST_AFTER_BUILD)
+    add_custom_target(check
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -C $<CONFIG>
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMENT "Running tests (ctest) after build"
+    )
+    add_dependencies(check ALL)
+  endif()
+endif()
+

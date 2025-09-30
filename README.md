@@ -1,142 +1,122 @@
-# GASAL2-Py: Python bindings for GPU alignment
+# GASAL2‑Py
 
-Python bindings for **GASAL2** (CUDA).  
+Python bindings and helper utilities for [GASAL2], a GPU‑accelerated pairwise alignment library.
 
-- A high-performance Pybind11 wrapper (gasal_py.cpp) with:
-- double-buffered (ping-pong) CUDA streams,
-- correct 8-byte alignment for ASCII H2D buffers,
-- OpenMP parallel post-processing for CIGAR coalescing (optional).
+This README covers install/build options and **opt‑in testing** (pytest via CTest) you can trigger after or during the CMake build.
 
-> CUDA is supported on Linux and Windows. macOS is not supported by NVIDIA CUDA.
+---
 
-## 0) Requirements
+## Requirements
 
-- NVIDIA GPU + compatible driver
-- **CUDA Toolkit** installed (e.g., `/usr/local/cuda-12.x`)
-- Python ≥ 3.9
-- Build tools:
-  - **pip** ≥ 23, **cmake** ≥ 3.27, **ninja** ≥ 1.11
-  - A C++17 compiler
+- **CUDA Toolkit** (matching your NVIDIA driver)
+- **CMake ≥ 3.20** (3.27+ recommended) and a build tool (e.g., Ninja)
+- **Python ≥ 3.8** with `pip`
+- **gcc/g++** compatible with your CUDA Toolkit
+- Optional for tests: `pytest`
 
-Optional:
-- OpenMP (for parallel host-side post-processing, if enabled in your wrapper)
+> Tip: On Linux, ensure `nvcc --version` and `nvidia-smi` both work before building.
 
-## 1) Install — the easy way (pip)
+---
 
-### A) Regular install (recommended)
-Builds a wheel once; no import-time rebuilds.
+## Quick start (pip)
+
+If wheels are not available for your platform, `pip` will build from source.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-python -m pip install -U pip "cmake>=3.27" "ninja>=1.11"
+python -m pip install -U pip setuptools wheel "cmake>=3.27" "ninja>=1.11"
 pip install .
 ```
 
-#### CUDA detection knobs (if needed)
-
-
-Supported cache variables (plumbed via CMake):
-- `GASAL2_CUDA_HOME` — path to your CUDA toolkit (bin/include/lib64)
-- `GASAL2_GPU_SM_ARCH` — e.g., `sm_80`, `sm_86`, `sm_89`, `sm_90`
-- `GASAL2_MAX_QUERY_LEN` — compile-time bound for query length (default 2048)
-- `GASAL2_N_CODE` — ASCII code used for ambiguous base `'N'` (default `0x4E`)
-- `GASAL2_N_PENALTY` — optional define to penalize `'N'` matches
-
-If CMake cannot find CUDA automatically, set:
+Verify import:
 
 ```bash
-export CMAKE_ARGS="-DGASAL2_CUDA_HOME=/usr/local/cuda-12.4 -DGASAL2_GPU_SM_ARCH=sm_86"
-# then:
-pip install .        # or: pip install -e .
+python -c "import gasal2; print('GASAL2-Py OK:', gasal2.__version__)"
 ```
 
-## 2) Install — CMake/Ninja quick start (out-of-tree)
+---
 
-If you prefer a pure CMake build/install flow:
+## Build from source with CMake
+
+If you prefer an explicit CMake build (e.g., for CI or local dev):
 
 ```bash
-# from repo root
+# From repo root
 mkdir -p build && cd build
 cmake -S .. -B . -G "Ninja" -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j
+```
+
+Install (optional):
+
+```bash
 cmake --install .
 ```
 
-Notes:
-- This produces and installs the `_gasal2` extension into your active environment/site-packages (or CMAKE_INSTALL_PREFIX if configured).
-- Pass the same CUDA knobs via `-D`:
-  ```bash
-  cmake -S .. -B . -G "Ninja"     -DCMAKE_BUILD_TYPE=Release     -DGASAL2_CUDA_HOME=/usr/local/cuda-12.4     -DGASAL2_GPU_SM_ARCH=sm_86
-  ```
+> You can pass CUDA/toolchain hints, e.g. `-DCMAKE_CUDA_ARCHITECTURES=80` or `-DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12` if needed.
 
-## 3) Verifying the install
+---
 
-### Import-only smoke test
+## Running tests
 
-```bash
-python - <<'PY'
-from gasal2 import GasalAligner, PAlign
-print("OK:", GasalAligner, PAlign)
-PY
-```
+You can run the Python test suite with **pytest directly**, or via **CMake/CTest** without installing the package.
 
-### Minimal functional check
+### A) Run tests after a pip build
 
 ```bash
-python - <<'PY'
-from gasal2 import GasalAligner
-
-try:
-    aln = GasalAligner()  # if your build expects ctor args, this will raise
-except TypeError:
-    # common fallback scoring: match=2, mismatch=-3, gap_open=5, gap_extend=2
-    aln = GasalAligner(match=2, mismatch=-3, gap_open=5, gap_extend=2)
-
-print("Methods:", [m for m in dir(aln) if not m.startswith("_")])
-
-if hasattr(aln, "align"):
-    q, s = "AAATCG", "AAATCG"
-    res = aln.align(q, s)
-    print("align() result:", res)
-else:
-    print("No align() method exposed; inspect API above.")
-PY
+python -m venv .venv && source .venv/bin/activate
+python -m pip install -U pip "cmake>=3.27" "ninja>=1.11" pytest
+pip install -e .           # or: pip install .
+pytest -q                  # discovers and runs tests/ with pytest
 ```
 
-## 4) Choosing the right GPU SM architecture
+### B) Run tests with CMake/CTest (no install needed)
 
-Find your SM:
+Enable tests at configure time and run them via `ctest`:
 
 ```bash
-nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
-# Map 8.0->sm_80, 8.6->sm_86, 8.9->sm_89, 9.0->sm_90, etc.
+mkdir -p build && cd build
+cmake -S .. -B . -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DGASAL2_ENABLE_TESTS=ON
+cmake --build . -j
+ctest --output-on-failure -C Release
 ```
 
-Then set `-DGASAL2_GPU_SM_ARCH=sm_XX` during build (pip or CMake).
+This adds the build tree to `PYTHONPATH` so the compiled extension can be imported by the tests without `cmake --install`.
 
-## 5) Common issues
+### C) Run tests automatically after the build (opt‑in)
 
-- **`/tmp/.../cmake: not found` during `import gasal2` (editable installs)**  
-  Ensure `cmake`/`ninja` are installed **inside your venv** and on PATH:
-  ```bash
-  python -m pip install -U "cmake>=3.27" "ninja>=1.11"
-  ```
-  Or use a non-editable `pip install .`.
+If you want a **post‑build** test step (useful for CI or local dev), also pass:
 
-- **CUDA not found**  
-  Provide `-DGASAL2_CUDA_HOME=/path/to/cuda` and ensure `bin` is on `PATH` and `lib64` on `LD_LIBRARY_PATH` as needed.
+```bash
+cmake -S .. -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release \
+      -DGASAL2_ENABLE_TESTS=ON -DGASAL2_TEST_AFTER_BUILD=ON
+cmake --build build --target check -j
+```
 
-- **Wrong SM arch**  
-  Rebuild with the correct `GASAL2_GPU_SM_ARCH` for your GPU.
+This defines a `check` target that invokes `ctest --output-on-failure` after building.
 
-- **Link/runtime errors for `libcudart.so`**  
-  Make sure your runtime can find CUDA libraries (system paths, `LD_LIBRARY_PATH`, or rpaths supplied by the build).
+---
 
-## 6) API surface (high-level)
+## Configuration options (CMake)
 
-The `gasal2` package re-exports symbols from the compiled `_gasal2` extension:
+- `-DGASAL2_ENABLE_TESTS=ON` – enable CTest targets to run Python tests
+- `-DGASAL2_TEST_AFTER_BUILD=ON` – add a `check` target that runs tests post‑build
+- `-DCMAKE_CUDA_ARCHITECTURES=<archs>` – e.g., `70;75;80`
+- `-DCMAKE_BUILD_TYPE=Release|RelWithDebInfo|Debug`
+- Toolchain overrides: `-DCMAKE_C_COMPILER`, `-DCMAKE_CXX_COMPILER`
 
-- `GasalAligner(...)` — construct an aligner (scoring, capacity options)
-- `PAlign` — alignment result / POD type (fields depend on binding)
+---
 
-Refer to docstrings and `dir()`/`help()` on the objects after import.
+## Troubleshooting
+
+- **CUDA toolkit/driver mismatch**: align your `nvcc` version with the installed driver. Reconfigure the build after fixing your environment.
+- **Can’t import in tests**: when using CTest, we inject `PYTHONPATH=${CMAKE_BINARY_DIR}`; if you changed target names or layout, update that path in `CMakeLists.txt`.
+- **Link errors to CUDA libs**: ensure `LD_LIBRARY_PATH` (Linux) includes your CUDA lib directory or that rpaths are set correctly.
+- **Multiple Python versions**: the build uses the interpreter selected by `pip`/CMake; activate the intended virtualenv first.
+
+---
+
+## License
+
+See `LICENSE` in this repository.
+

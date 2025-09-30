@@ -39,22 +39,30 @@ jobs:
 
       - name: Read current version from pyproject.toml
         id: vout
+        shell: bash
         run: |
           python - <<'PY'
           import subprocess, pathlib, os
           try:
-              import tomllib  # py>=3.11
+              import tomllib  # Python 3.11+
           except Exception:
               import tomli as tomllib
 
-          cur = tomllib.loads(pathlib.Path("pyproject.toml").read_bytes()).get("project",{}).get("version","")
+          # Read current pyproject as TEXT
+          cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          cur = tomllib.loads(cur_text).get("project", {}).get("version", "")
+
+          # Read previous pyproject (if exists) as TEXT
           try:
-              prev_bytes = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
-              prev = tomllib.loads(prev_bytes).get("project",{}).get("version","")
+              prev_bytes = subprocess.check_output(["git", "show", "HEAD^:pyproject.toml"])
+              prev_text = prev_bytes.decode("utf-8", errors="replace")
+              prev = tomllib.loads(prev_text).get("project", {}).get("version", "")
           except Exception:
               prev = ""
+
           changed = "true" if (cur and cur != prev) else "false"
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={cur}\n")
               fh.write(f"prev_version={prev}\n")
               fh.write(f"changed={changed}\n")
@@ -87,6 +95,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build custom CUDA-enabled manylinux image (${{ matrix.ml_image.kind }})
+        shell: bash
         run: |
           cat > Dockerfile.ci <<'DOCKER'
           ARG BASE

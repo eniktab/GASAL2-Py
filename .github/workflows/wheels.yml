@@ -16,7 +16,8 @@ permissions:
 
 env:
   PACKAGE_NAME: gasal2_py
-  PYTHON_BUILD_VERS: "cp39 cp310 cp311 cp312"
+  # Build these CPython versions
+  PYTHON_BUILD_PATS: "cp39-* cp310-* cp311-* cp312-*"
 
 jobs:
   version-check:
@@ -31,11 +32,21 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Setup Python (for tomllib)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Read current version from pyproject.toml
         id: vout
         run: |
           python - <<'PY'
-          import subprocess, tomllib, pathlib, os
+          import subprocess, pathlib, os
+          try:
+              import tomllib  # Python >=3.11
+          except Exception:
+              import tomli as tomllib  # fallback if needed
+
           cur = tomllib.loads(pathlib.Path("pyproject.toml").read_bytes()).get("project",{}).get("version","")
           try:
               prev_bytes = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
@@ -58,13 +69,15 @@ jobs:
       matrix:
         ml_image:
           - kind: manylinux2014
-            tag: "gasal2-manylinux2014-cuda:12.4.0"          # <- literals (no env here)
+            tag: "gasal2-manylinux2014-cuda:12.4.0"
             base: "quay.io/pypa/manylinux2014_x86_64"
             cuda_from: "nvidia/cuda:12.4.0-devel-centos7"
+            env_var: "CIBW_MANYLINUX_X86_64_IMAGE"
           - kind: manylinux_2_28
-            tag: "gasal2-manylinux_2_28-cuda:12.4.1"        # <- literals (no env here)
+            tag: "gasal2-manylinux_2_28-cuda:12.4.1"
             base: "quay.io/pypa/manylinux_2_28_x86_64"
             cuda_from: "nvidia/cuda:12.4.1-devel-rockylinux8"
+            env_var: "CIBW_MANYLINUX_2_28_X86_64_IMAGE"
     steps:
       - uses: actions/checkout@v4
 
@@ -79,11 +92,14 @@ jobs:
           ARG BASE
           ARG CUDA_FROM
           FROM ${CUDA_FROM} as cuda
+          # provide /usr/local/cuda
 
           FROM ${BASE}
+          # install a minimal VCS; package manager differs by base image
           RUN yum -y install git && yum clean all || true \
            || (microdnf -y install git && microdnf clean all || true) \
            || (dnf -y install git && dnf clean all || true)
+          # copy CUDA toolkit into a neutral prefix
           COPY --from=cuda /usr/local/cuda /opt/cuda
           ENV PATH="/opt/cuda/bin:${PATH}" CUDA_HOME="/opt/cuda"
           DOCKER
@@ -93,21 +109,31 @@ jobs:
             -t ${{ matrix.ml_image.tag }} \
             -f Dockerfile.ci .
 
-      - name: Install cibuildwheel
+      - name: Install cibuildwheel & build tools
         run: |
           python -m pip install -U pip
           python -m pip install "cibuildwheel>=2.20" build
 
+      - name: Select image override env var for cibuildwheel
+        run: |
+          echo "${{ matrix.ml_image.env_var }}=${{ matrix.ml_image.tag }}" >> "$GITHUB_ENV"
+
       - name: Build wheels with cibuildwheel on ${{ matrix.ml_image.kind }}
         env:
-          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.ml_image.tag }}
-          CIBW_BUILD: ${{ env.PYTHON_BUILD_VERS }}-manylinux_x86_64
+          # Limit to x86_64 on Linux
+          CIBW_ARCHS_LINUX: x86_64
+          # Build the selected CPython versions
+          CIBW_BUILD: ${{ env.PYTHON_BUILD_PATS }}
+          # Skip PyPy and musllinux in this CUDA workflow
           CIBW_SKIP: "pp* *-musllinux_*"
+          # Ensure cmake/ninja are available inside the container
           CIBW_BEFORE_BUILD: "python -m pip install -U pip cmake>=3.27 ninja>=1.11"
+          # Pass CUDA location to your CMake (adjust if your build expects different var)
           CIBW_ENVIRONMENT: >
             CMAKE_ARGS="-DGASAL2_CUDA_HOME=/opt/cuda"
+          # Be reasonably verbose
           CIBW_BUILD_VERBOSITY: "1"
-          # If your auditwheel is new enough to support --exclude; if not, drop it.
+          # Repair produced wheels; exclude libcuda driver from bundling
           CIBW_REPAIR_WHEEL_COMMAND: >
             auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1
         run: |
@@ -141,14 +167,15 @@ jobs:
           find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-release/ \;
           ls -l to-release
 
-      - name: Create tag
+      - name: Create tag if missing
         run: |
           git fetch --tags || true
           if git rev-parse "v${{ needs.version-check.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag already exists; skipping"; exit 0
+            echo "Tag v${{ needs.version-check.outputs.version }} already exists; continuing."
+          else
+            git tag "v${{ needs.version-check.outputs.version }}"
+            git push origin "v${{ needs.version-check.outputs.version }}"
           fi
-          git tag "v${{ needs.version-check.outputs.version }}"
-          git push origin "v${{ needs.version-check.outputs.version }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -164,9 +191,8 @@ jobs:
     name: Publish to PyPI (optional)
     runs-on: ubuntu-latest
     needs: release
-    if: |
-      needs.version-check.outputs.changed == 'true' &&
-      secrets.PYPI_API_TOKEN != ''
+    # Only gate on the version change here; the secret check is step-level
+    if: needs.version-check.outputs.changed == 'true'
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -178,9 +204,14 @@ jobs:
           find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-publish/ \;
 
       - name: Publish
+        if: ${{ secrets.PYPI_API_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@v1.12.2
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages_dir: to-publish
           skip_existing: true
+
+      - name: Skip publish (no PYPI_API_TOKEN)
+        if: ${{ secrets.PYPI_API_TOKEN == '' }}
+        run: echo "PYPI_API_TOKEN not set; skipping PyPI publish."
 

@@ -37,28 +37,55 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Read current version from pyproject.toml
+      - name: Read current version from pyproject.toml (tolerant)
         id: vout
         shell: bash
         run: |
           python - <<'PY'
-          import subprocess, pathlib, os
-          try:
-              import tomllib  # Python 3.11+
-          except Exception:
-              import tomli as tomllib
+          import os, re, subprocess, pathlib, sys
+          def parse_version_tolerant(text: str) -> str:
+              # First try tomllib
+              try:
+                  import tomllib
+                  data = tomllib.loads(text)
+                  v = (data.get("project") or {}).get("version")
+                  if isinstance(v, str) and v.strip():
+                      return v.strip()
+              except Exception as e:
+                  # Show a small diagnostic (non-fatal)
+                  print(f"[version-check] tomllib parse failed: {e}", file=sys.stderr)
 
-          cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
-          cur = tomllib.loads(cur_text).get("project", {}).get("version", "")
+              # Fallback: regex — first version="x.y.z" under [project] or anywhere
+              # This keeps things running even if TOML has a trailing comma or comments.
+              m = re.search(r'(?mi)^\s*version\s*=\s*"(.*?)"\s*$', text)
+              if m:
+                  cand = m.group(1).strip()
+                  if cand:
+                      return cand
+              return ""
 
-          try:
-              prev_bytes = subprocess.check_output(["git", "show", "HEAD^:pyproject.toml"])
-              prev_text = prev_bytes.decode("utf-8", errors="replace")
-              prev = tomllib.loads(prev_text).get("project", {}).get("version", "")
-          except Exception:
-              prev = ""
+          def read_prev_pyproject() -> str:
+              try:
+                  b = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
+                  return b.decode("utf-8", "replace")
+              except Exception:
+                  return ""
+
+          cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8", errors="replace")
+          prev_text = read_prev_pyproject()
+
+          cur = parse_version_tolerant(cur_text)
+          prev = parse_version_tolerant(prev_text) if prev_text else ""
 
           changed = "true" if (cur and cur != prev) else "false"
+
+          # Friendly diagnostics to help if TOML is malformed
+          if not cur:
+              print("[version-check] Could not read a valid version from current pyproject.toml.", file=sys.stderr)
+              # Print around line 15 to help debug when user saw an error there
+              lines = cur_text.splitlines()
+              for i in range(max(0,15-5), min(len(lines),15+5)):
+                  print(f"[{i+1:03}] {lines[i]}", file=sys.stderr)
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={cur}\n")

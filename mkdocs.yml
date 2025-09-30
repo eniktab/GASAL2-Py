@@ -1,0 +1,10 @@
+site_name: GASAL2-Py — GASAL2 Python bindings (CUDA GPU)
+site_url: https://eniktab.github.io/GASAL2-Py/
+theme:
+  name: mkdocs
+nav:
+  - Home: index.md
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/eniktab/GASAL2-Py

@@ -2,6 +2,9 @@
 
 [![DOI](https://zenodo.org/badge/1066128365.svg)](https://doi.org/10.5281/zenodo.17231489)
 
+**GASAL2-Py** is the  **Python** interface to **GASAL2**, a CUDA GPU library for DNA/RNA sequence alignment:  
+**Repo:** https://github.com/eniktab/GASAL2-Py
+
 
 > **Description**  
 > This project provides Python bindings for **GASAL2** (GPU-accelerated sequence alignment).  
@@ -82,6 +85,78 @@ cmake --build build --target check -j
 ```
 
 ---
+### Quickstart (single alignment)
+
+```python
+from gasal2 import GasalAligner
+
+# Smith–Waterman with affine gaps (example scoring)
+aln = GasalAligner(match=2, mismatch=-3, gap_open=5, gap_extend=2)
+
+q = "AACTGAGCTTAGCTA"
+s = "AACTGAGGTTAGCTA"
+
+res = aln.align(q, s)  # -> PAlign
+
+print("score:", res.score)
+print("query  beg/end:", res.q_beg, res.q_end)
+print("target beg/end:", res.s_beg, res.s_end)
+
+# Convert run-length ops/lens to a SAM-like CIGAR string
+OP2C = {0: "M", 1: "X", 2: "D", 3: "I"}
+cigar = "".join(f"{ln}{OP2C.get(op,'M')}" for op, ln in zip(res.ops, res.lens))
+print("CIGAR:", cigar)
+```
+
+**`PAlign` fields**:
+- `score` – alignment score  
+- `q_beg`, `q_end` – query start/end (0-based, end-exclusive)  
+- `s_beg`, `s_end` – target start/end (0-based, end-exclusive)  
+- `ops`, `lens` – run-length encoded edit script where ops are `0:M`, `1:X`, `2:D`, `3:I`
+
+### Batch alignment (fast path)
+
+Batching amortizes kernel launches and usually yields big speedups:
+
+```python
+from gasal2 import GasalAligner
+
+aln = GasalAligner(match=2, mismatch=-3, gap_open=5, gap_extend=2,
+                   max_q=4096, max_t=16384, max_batch=512)
+
+queries = ["AAAACTG", "GGTACCA", "TACTGGA"]
+targets = ["AAACTTG", "GGTGCCA", "TACTGAA"]  # Strings must be A/C/G/T only
+
+res_list = aln.align_batch(queries, targets)  # List[PAlign], one per pair
+print("n results:", len(res_list))
+```
+
+- `max_batch` controls the *host-side* minibatch; the library will internally rebatch if needed.  
+- Keep sequences uppercase `A/C/G/T`. Non-ACGT symbols may be rejected or treated as mismatches. 
+
+## Minimal Example
+
+```python
+# After either build path:
+# match=+2, mismatch=-3, gap_open=-5, gap_extend=-1
+import gasalwrap
+
+aln = gasalwrap.GasalAligner(2, -3, -5, -1, max_q=2048, max_t=8192, max_batch=1024)
+
+q = "AAACTGNNNTTT"
+s = "AAACTGTTTTTT"
+
+res = aln.align(q, s)
+print("score:", res.score)
+print("q:", res.q_beg, res.q_end, "s:", res.s_beg, res.s_end)
+print("ops:", list(res.ops))
+print("lens:", list(res.lens))
+```
+
+If you see plausible coordinates and nonempty `ops/lens`, the CUDA pipeline and host‑side post‑processing are working.
+
+
+---
 
 ## Manual Build (Makefile + Pybind11)
 
@@ -139,29 +214,6 @@ Verify:
 ```bash
 python -c "import gasalwrap; print('ok:', gasalwrap)"
 ```
-
----
-
-## Minimal Example
-
-```python
-# After either build path:
-# match=+2, mismatch=-3, gap_open=-5, gap_extend=-1
-import gasalwrap
-
-aln = gasalwrap.GasalAligner(2, -3, -5, -1, max_q=2048, max_t=8192, max_batch=1024)
-
-q = "AAACTGNNNTTT"
-s = "AAACTGTTTTTT"
-
-res = aln.align(q, s)
-print("score:", res.score)
-print("q:", res.q_beg, res.q_end, "s:", res.s_beg, res.s_end)
-print("ops:", list(res.ops))
-print("lens:", list(res.lens))
-```
-
-If you see plausible coordinates and nonempty `ops/lens`, the CUDA pipeline and host‑side post‑processing are working.
 
 ---
 
@@ -228,3 +280,7 @@ This Python wrapper builds and links against **GASAL2**. The current upstream re
 See `LICENSE` in this repository.
 
 [GASAL2]: https://github.com/ixxi-dante/gasal2
+
+---
+**Search hints:** GASAL GASAL2 python, GASAL2-Py, GASAL2 CUDA Python, GPU Smith–Waterman Python.
+

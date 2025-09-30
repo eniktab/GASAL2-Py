@@ -1,0 +1,21 @@
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "GASAL2-Py",
+  "alternateName": "GASAL2 python",
+  "description": "GASAL2-Py — Python bindings for GASAL2 (CUDA GPU sequence alignment).",
+  "codeRepository": "https://github.com/eniktab/GASAL2-Py",
+  "programmingLanguage": "Python",
+  "applicationCategory": "Bioinformatics",
+  "keywords": "GASAL2, GASAL2-Py, GASAL2 python, CUDA, GPU, sequence alignment, Smith-Waterman",
+  "license": "https://github.com/eniktab/GASAL2-Py/blob/main/LICENSE",
+  "url": "https://eniktab.github.io/GASAL2-Py/",
+  "softwareHelp": "https://eniktab.github.io/GASAL2-Py/",
+  "sameAs": [
+    "https://pypi.org/project/gasal2-py/",
+    "https://github.com/eniktab/GASAL2-Py"
+  ]
+}
+<script type="application/ld+json">
+{% include "seo.json" %}
+</script>

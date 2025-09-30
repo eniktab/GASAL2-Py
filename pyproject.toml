@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "BSD-3-Clause" }  # or your actual license
 authors = [{ name = "Eli Niktab", email = "maniktab@gmail.com" }]
-keywords = ["alignment", "bioinformatics", "GPU", "CUDA", "genomics"]
+keywords = ["GASAL2", "GASAL2-Py", "GASAL2 python", "CUDA", "GPU", "bioinformatics", "alignment", "smith-waterman"]
+classifiers = [
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: BSD License",

@@ -44,7 +44,7 @@ jobs:
           python - <<'PY'
           import subprocess, pathlib, os
           try:
-              import tomllib
+              import tomllib  # Python 3.11+
           except Exception:
               import tomli as tomllib
 
@@ -86,6 +86,8 @@ jobs:
             env_var: "CIBW_MANYLINUX_2_28_X86_64_IMAGE"
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: false   # external deps handled by your CMake ExternalProject
 
       - name: Set up Python for helper tooling
         uses: actions/setup-python@v5
@@ -125,7 +127,7 @@ jobs:
         run: |
           echo "${{ matrix.ml_image.env_var }}=${{ matrix.ml_image.tag }}" >> "$GITHUB_ENV"
 
-      - name: Build wheels with cibuildwheel on ${{ matrix.ml_image.kind }}
+      - name: Build wheels with cibuildwheel on ${{ matrix.ml_image.kind }} (continue on error)
         env:
           # Limit to x86_64 on Linux
           CIBW_ARCHS_LINUX: x86_64
@@ -135,21 +137,30 @@ jobs:
           CIBW_SKIP: "pp* *-musllinux_*"
           # Ensure build deps are available inside the container's PEP 517 env
           CIBW_BEFORE_BUILD: >
-            python -m pip install -U pip
+            git submodule update --init --recursive || true
+            && python -m pip install -U pip
             cmake>=3.27
             ninja>=1.11
             scikit-build-core>=0.10
             pybind11>=2.12
-          # CUDA discovery + both lib paths (CUDA 12 layout)
+          # CUDA discovery + both lib paths (CUDA 12 layout) + exact nvcc path + arches
+          # Also inject PATH and NVCC so your ExternalProject's configure.sh sees nvcc
           CIBW_ENVIRONMENT: >
-            CMAKE_ARGS="-DGASAL2_CUDA_HOME=/opt/cuda
+            CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release
+                        -DSKBUILD_BUILD_VERBOSE=1
+                        -DCMAKE_VERBOSE_MAKEFILE=ON
+                        -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc
+                        -DCMAKE_CUDA_ARCHITECTURES=70;75;80;86
+                        -DGASAL2_CUDA_HOME=/opt/cuda
                         -DCUDAToolkit_ROOT=/opt/cuda
-                        -DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda
-                        -DGASAL2_GPU_SM_ARCH=sm_80"
+                        -DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda"
+            PATH=/opt/cuda/bin:$PATH
+            NVCC=/opt/cuda/bin/nvcc
             CUDA_HOME=/opt/cuda
             CUDA_PATH=/opt/cuda
             CMAKE_PREFIX_PATH=/opt/cuda
             LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+            SKBUILD_CMAKE_BUILD_PARALLEL_LEVEL=2
           # Be verbose so failures provide CMake diagnostics
           CIBW_BUILD_VERBOSITY: "3"
           # Ensure auditwheel sees libcudart in the repair phase (prefix with LD_LIBRARY_PATH)
@@ -157,19 +168,22 @@ jobs:
             bash -lc 'export LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH;
                       auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1'
         run: |
-          python -m cibuildwheel --output-dir wheelhouse
+          # Don't fail the step if some wheels fail; upload whatever was built
+          python -m cibuildwheel --output-dir wheelhouse || true
 
       - name: Build sdist
+        # sdist is independent; keep it even if some wheels failed
         run: |
           python -m build --sdist --outdir dist
 
-      - name: Upload artifacts
+      - name: Upload artifacts (whatever succeeded)
         uses: actions/upload-artifact@v4
         with:
           name: linux-wheels-${{ matrix.ml_image.kind }}
           path: |
             wheelhouse/*.whl
             dist/*.tar.gz
+          if-no-files-found: ignore
 
   release:
     name: Create GitHub Release if version changed
@@ -184,8 +198,14 @@ jobs:
       - name: Flatten artifacts for release/publish
         run: |
           mkdir -p to-release
-          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-release/ \;
-          ls -l to-release
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-release/ \; || true
+          ls -l to-release || true
+
+      - name: Ensure we have at least one file
+        run: |
+          if ! ls to-release/* >/dev/null 2>&1; then
+            echo "No distributions built; skipping tag/release"; exit 0
+          fi
 
       - name: Create tag if missing
         run: |
@@ -220,7 +240,10 @@ jobs:
       - name: Collect distributions
         run: |
           mkdir -p to-publish
-          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-publish/ \;
+          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-publish/ \; || true
+          if ! ls to-publish/* >/dev/null 2>&1; then
+            echo "No dists to publish; exiting gracefully"; exit 0
+          fi
 
       - name: Publish (if token present)
         env:

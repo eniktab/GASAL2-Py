@@ -227,10 +227,10 @@ If you use **GASAL2‑Py** in academic work, please cite the Zenodo record and t
 ```bibtex
 @software{gasal2py-zenodo,
   title        = {GASAL2-Py: Python bindings for GASAL2},
-  author       = {Niktab, Eli and contributors},
+  author       = {Niktab, Eliatan},
   year         = {2025},
   publisher    = {Zenodo},
-  version      = {v0.1.0},
+  version      = {v1.0.0},
   doi          = {10.5281/zenodo.17231489},
   url          = {https://doi.org/10.5281/zenodo.17231489}
 }

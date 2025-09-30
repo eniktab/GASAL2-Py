@@ -1,5 +1,8 @@
 # GASAL2‑Py — Fast GPU Semi‑Global Alignment with Python Bindings
 
+[![DOI](https://zenodo.org/badge/1066128365.svg)](https://doi.org/10.5281/zenodo.17231489)
+
+
 **GASAL2‑Py** provides Python bindings and build helpers for **[GASAL2]**, a CUDA‑accelerated pairwise aligner.
 This repo includes a minimal reproducible GASAL2 build (static + shared) **and** a high‑performance Pybind11
 extension with double‑buffered CUDA streams and optional OpenMP post‑processing.
@@ -154,6 +157,28 @@ If you see plausible coordinates and nonempty `ops/lens`, the CUDA pipeline and 
 
 ---
 
+## How to cite
+
+If you use **GASAL2‑Py** in academic work, please cite the Zenodo record and the upstream GASAL2 project.
+
+**DOI:** [![DOI](https://zenodo.org/badge/1066128365.svg)](https://doi.org/10.5281/zenodo.17231489)
+
+### BibTeX (Zenodo)
+```bibtex
+@software{gasal2py-zenodo,
+  title        = {GASAL2-Py: Python bindings for GASAL2},
+  author       = {Niktab, Eli and contributors},
+  year         = {2025},
+  publisher    = {Zenodo},
+  version      = {v0.1.0},
+  doi          = {10.5281/zenodo.17231489},
+  url          = {https://doi.org/10.5281/zenodo.17231489}
+}
+```
+
+Also cite the **GASAL2** repository (and paper, if applicable) corresponding to the version you use:
+- GASAL2 (upstream): https://github.com/nahmedraja/GASAL2
+
 ## Troubleshooting
 
 - **`nvcc: command not found`** — set `CUDA_HOME` and update `PATH`.
@@ -181,6 +206,14 @@ If you see plausible coordinates and nonempty `ops/lens`, the CUDA pipeline and 
 - When upgrading CUDA, **rebuild** both GASAL2 and the Python extension.
 
 ---
+
+## Upstream repository & licensing
+
+This Python wrapper builds and links against **GASAL2**. The current upstream repository is:
+
+- **Main GASAL2 repo:** https://github.com/nahmedraja/GASAL2
+
+**Important:** Please **check the GASAL2 repository's LICENSE** and any third‑party dependency licenses **before redistributing binaries or wheels** built from this project. Your usage and redistribution must comply with the upstream license(s).
 
 ## License
 

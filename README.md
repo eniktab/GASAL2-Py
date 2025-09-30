@@ -67,7 +67,7 @@ You can run the Python test suite with **pytest directly**, or via **CMake/CTest
 python -m venv .venv && source .venv/bin/activate
 python -m pip install -U pip "cmake>=3.27" "ninja>=1.11" pytest
 pip install -e .           # or: pip install .
-pytest -q                  # discovers and runs tests/ with pytest
+pytest -q -s                  # discovers and runs tests/ with pytest
 ```
 
 ### B) Run tests with CMake/CTest (no install needed)

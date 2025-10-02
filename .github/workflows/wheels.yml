@@ -3,16 +3,14 @@ name: Build & Release Wheels (CUDA matrix, manylinux/macos/windows)
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*"   # vX.Y.Z or pre-releases like vX.Y.Zrc1
+      - "v[0-9]+.[0-9]+.[0-9]+*"   # vX.Y.Z or vX.Y.Zrc1, etc.
   workflow_dispatch:
 
 env:
   PACKAGE_NAME: gasal2
-  # CIBW defaults: verbose logs, skip 3.6 & PyPy, no prerelease Pythons
   CIBW_BUILD_VERBOSITY: "1"
   CIBW_SKIP: "cp36-* pp* *-win32 *-manylinux_i686"
   CIBW_PRERELEASE_PYTHONS: "False"
-  # Quick import smoke test after each wheel build:
   CIBW_TEST_COMMAND: "python -c \"import gasal2 as m; print(getattr(m,'__version__','n/a'))\""
 
 jobs:
@@ -28,9 +26,9 @@ jobs:
         shell: bash
         run: |
           ref="${GITHUB_REF_NAME}"
-          # Accept vX.Y.Z and vX.Y.Z-<pre>
+          # Accept vX.Y.Z and pre-releases like vX.Y.Zrc1
           if [[ "$ref" =~ ^v([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z\.-]*)$ ]]; then
-            echo "version=${BASH_REMATCH[1]#v}" >> "$GITHUB_OUTPUT"
+            echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
             echo "tag=${ref}" >> "$GITHUB_OUTPUT"
           else
             echo "Tag $ref is not semver-like (vX.Y.Z)"; exit 1
@@ -50,26 +48,19 @@ jobs:
         python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python for cibuildwheel
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.20.0
         env:
           CIBW_BUILD: ${{ matrix.python }}
-          # Pick your manylinux; 2014 is broadly compatible. If you need newer GCC, use manylinux_2_28.
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux2014
-          # Export version into build env in case your build backend consumes it
           PACKAGE_VERSION: ${{ needs.version-check.outputs.version }}
         with:
           output-dir: wheelhouse
-
-      - name: Upload wheels (artifact)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: linux-wheels
           path: wheelhouse/*.whl
@@ -85,12 +76,9 @@ jobs:
         python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python for cibuildwheel
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.20.0
         env:
@@ -99,9 +87,7 @@ jobs:
           PACKAGE_VERSION: ${{ needs.version-check.outputs.version }}
         with:
           output-dir: wheelhouse
-
-      - name: Upload wheels (artifact)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}-wheels
           path: wheelhouse/*.whl
@@ -116,12 +102,9 @@ jobs:
         python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python for cibuildwheel
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.20.0
         env:
@@ -129,9 +112,7 @@ jobs:
           PACKAGE_VERSION: ${{ needs.version-check.outputs.version }}
         with:
           output-dir: wheelhouse
-
-      - name: Upload wheels (artifact)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-wheels
           path: wheelhouse/*.whl
@@ -142,19 +123,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Build sdist
         run: |
           python -m pip install --upgrade build
           python -m build --sdist --outdir dist
-
-      - name: Upload sdist (artifact)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -185,29 +161,22 @@ jobs:
           python -m pip install twine
           python -m twine check to-publish/*
 
-      - name: Skip if version already on PyPI
+      - name: Check if version exists on PyPI
         id: pypi_exists
         shell: bash
         env:
           PKG: ${{ env.PACKAGE_NAME }}
           VER: ${{ needs.version-check.outputs.version }}
         run: |
-          echo "Checking PyPI for ${PKG}==${VER}"
           code=$(curl -s -o /tmp/pypi.json -w "%{http_code}" "https://pypi.org/pypi/${PKG}/json" || true)
           if [ "$code" != "200" ]; then
-            echo "exists=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          python - <<'PY'
-import json, os
-data = json.load(open("/tmp/pypi.json"))
-ver = os.environ["VER"]
-exists = ver in data.get("releases", {})
-open(os.environ["GITHUB_OUTPUT"], "a").write(f"exists={'true' if exists else 'false'}\n")
-print("exists =", exists)
-PY
+          python -c "import json,os;d=json.load(open('/tmp/pypi.json'));print('exists =',os.environ['VER'] in d.get('releases',{}));open(os.environ['GITHUB_OUTPUT'],'a').write('exists='+('true' if os.environ['VER'] in d.get('releases',{}) else 'false')+'\n')"
 
-      - name: Publish to PyPI (token-based)
-        if: ${{ steps.pypi_exists.outputs.exists != 'true' && env.PYPI_API_TOKEN != '' }}
+      - name: Publish to PyPI
+        if: ${{ steps.pypi_exists.outputs.exists != 'true' && secrets.PYPI_API_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@v1.12.2
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
@@ -215,7 +184,6 @@ PY
           skip_existing: true
 
       - name: Skip publish (already on PyPI or no token)
-        if: ${{ steps.pypi_exists.outputs.exists == 'true' || env.PYPI_API_TOKEN == '' }}
-        run: |
-          echo "Skipping publish: version exists on PyPI or PYPI_API_TOKEN not set."
+        if: ${{ steps.pypi_exists.outputs.exists == 'true' || secrets.PYPI_API_TOKEN == '' }}
+        run: echo "Skipping publish."
 

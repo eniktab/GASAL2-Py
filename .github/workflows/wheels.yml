@@ -3,15 +3,17 @@ name: Build & Release Wheels (CUDA matrix, manylinux/macos/windows)
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"   # vX.Y.Z or pre-releases like vX.Y.Zrc1
   workflow_dispatch:
 
 env:
-  PACKAGE_NAME: your_package_name
-  CIBW_BUILD_VERBOSITY: 1
-  CIBW_TEST_COMMAND: "python -c \"import your_package_name as m; print(m.__version__)\""
-  CIBW_SKIP: "cp36-* pp*"
+  PACKAGE_NAME: gasal2
+  # CIBW defaults: verbose logs, skip 3.6 & PyPy, no prerelease Pythons
+  CIBW_BUILD_VERBOSITY: "1"
+  CIBW_SKIP: "cp36-* pp* *-win32 *-manylinux_i686"
   CIBW_PRERELEASE_PYTHONS: "False"
+  # Quick import smoke test after each wheel build:
+  CIBW_TEST_COMMAND: "python -c \"import gasal2 as m; print(getattr(m,'__version__','n/a'))\""
 
 jobs:
   version-check:
@@ -19,18 +21,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.getver.outputs.version }}
+      tag: ${{ steps.getver.outputs.tag }}
     steps:
       - name: Get version
         id: getver
+        shell: bash
         run: |
-          # Expect tags like v1.2.3
-          if [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          ref="${GITHUB_REF_NAME}"
+          # Accept vX.Y.Z and vX.Y.Z-<pre>
+          if [[ "$ref" =~ ^v([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z\.-]*)$ ]]; then
+            echo "version=${BASH_REMATCH[1]#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${ref}" >> "$GITHUB_OUTPUT"
           else
-            echo "Tag ${GITHUB_REF_NAME} is not semver-like (vX.Y.Z)"; exit 1
+            echo "Tag $ref is not semver-like (vX.Y.Z)"; exit 1
           fi
       - name: Show version
-        run: echo "Version is ${{ steps.getver.outputs.version }}"
+        run: |
+          echo "Version: ${{ steps.getver.outputs.version }}"
+          echo "Tag:      ${{ steps.getver.outputs.tag }}"
 
   linux-wheels:
     name: Linux wheels (manylinux)
@@ -52,10 +60,11 @@ jobs:
         uses: pypa/cibuildwheel@v2.20.0
         env:
           CIBW_BUILD: ${{ matrix.python }}
-          CIBW_ENVIRONMENT: |
-            PACKAGE_VERSION=${{ needs.version-check.outputs.version }}
+          # Pick your manylinux; 2014 is broadly compatible. If you need newer GCC, use manylinux_2_28.
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux2014
+          # Export version into build env in case your build backend consumes it
+          PACKAGE_VERSION: ${{ needs.version-check.outputs.version }}
         with:
           output-dir: wheelhouse
 
@@ -87,8 +96,7 @@ jobs:
         env:
           CIBW_BUILD: ${{ matrix.python }}
           CIBW_ARCHS_MACOS: ${{ matrix.arch }}
-          CIBW_ENVIRONMENT: |
-            PACKAGE_VERSION=${{ needs.version-check.outputs.version }}
+          PACKAGE_VERSION: ${{ needs.version-check.outputs.version }}
         with:
           output-dir: wheelhouse
 
@@ -118,8 +126,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.20.0
         env:
           CIBW_BUILD: ${{ matrix.python }}
-          CIBW_ENVIRONMENT: |
-            PACKAGE_VERSION=${{ needs.version-check.outputs.version }}
+          PACKAGE_VERSION: ${{ needs.version-check.outputs.version }}
         with:
           output-dir: wheelhouse
 
@@ -145,6 +152,7 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build --sdist --outdir dist
+
       - name: Upload sdist (artifact)
         uses: actions/upload-artifact@v4
         with:
@@ -152,7 +160,7 @@ jobs:
           path: dist/*.tar.gz
 
   collect:
-    name: Collect all artifacts
+    name: Twine check & publish to PyPI
     needs: [linux-wheels, macos-wheels, windows-wheels, sdist]
     runs-on: ubuntu-latest
     steps:
@@ -162,11 +170,12 @@ jobs:
           path: to-publish
 
       - name: Flatten artifact tree
+        shell: bash
         run: |
           shopt -s globstar nullglob
           mkdir -p to-publish-flat
           mv to-publish/**/*.{whl,tar.gz} to-publish-flat/ || true
-          rmdir -p to-publish 2>/dev/null || true
+          rm -rf to-publish
           mv to-publish-flat to-publish
           ls -l to-publish
 
@@ -176,37 +185,32 @@ jobs:
           python -m pip install twine
           python -m twine check to-publish/*
 
-      # NEW: Skip if the version already exists on PyPI
       - name: Skip if version already on PyPI
         id: pypi_exists
+        shell: bash
+        env:
+          PKG: ${{ env.PACKAGE_NAME }}
+          VER: ${{ needs.version-check.outputs.version }}
         run: |
-          set -e
-          PKG="${{ env.PACKAGE_NAME }}"
-          VER="${{ needs.version-check.outputs.version }}"
-          echo "Checking PyPI for $PKG==$VER"
+          echo "Checking PyPI for ${PKG}==${VER}"
           code=$(curl -s -o /tmp/pypi.json -w "%{http_code}" "https://pypi.org/pypi/${PKG}/json" || true)
           if [ "$code" != "200" ]; then
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "exists=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           python - <<'PY'
-            import json, os, sys
-            data = json.load(open("/tmp/pypi.json"))
-            ver = os.environ["VER"]
-            exists = ver in data.get("releases", {})
-            print("exists =", exists)
-            open(os.environ["GITHUB_OUTPUT"], "a").write(f"exists={'true' if exists else 'false'}\n")
-          PY
-        env:
-          VER: ${{ needs.version-check.outputs.version }}
+import json, os
+data = json.load(open("/tmp/pypi.json"))
+ver = os.environ["VER"]
+exists = ver in data.get("releases", {})
+open(os.environ["GITHUB_OUTPUT"], "a").write(f"exists={'true' if exists else 'false'}\n")
+print("exists =", exists)
+PY
 
-      - name: Publish (if token present)
-        if: ${{ steps.pypi_exists.outputs.exists != 'true' }}
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Publish to PyPI (token-based)
+        if: ${{ steps.pypi_exists.outputs.exists != 'true' && env.PYPI_API_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@v1.12.2
         with:
-          password: ${{ env.PYPI_API_TOKEN }}
+          password: ${{ secrets.PYPI_API_TOKEN }}
           packages_dir: to-publish
           skip_existing: true
 

@@ -44,7 +44,6 @@ jobs:
           python - <<'PY'
           import os, re, subprocess, pathlib, sys
           def parse_version_tolerant(text: str) -> str:
-              # First try tomllib
               try:
                   import tomllib
                   data = tomllib.loads(text)
@@ -52,41 +51,29 @@ jobs:
                   if isinstance(v, str) and v.strip():
                       return v.strip()
               except Exception as e:
-                  # Show a small diagnostic (non-fatal)
                   print(f"[version-check] tomllib parse failed: {e}", file=sys.stderr)
-
-              # Fallback: regex — first version="x.y.z" under [project] or anywhere
-              # This keeps things running even if TOML has a trailing comma or comments.
               m = re.search(r'(?mi)^\s*version\s*=\s*"(.*?)"\s*$', text)
               if m:
                   cand = m.group(1).strip()
                   if cand:
                       return cand
               return ""
-
           def read_prev_pyproject() -> str:
               try:
                   b = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
                   return b.decode("utf-8", "replace")
               except Exception:
                   return ""
-
           cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8", errors="replace")
           prev_text = read_prev_pyproject()
-
           cur = parse_version_tolerant(cur_text)
           prev = parse_version_tolerant(prev_text) if prev_text else ""
-
           changed = "true" if (cur and cur != prev) else "false"
-
-          # Friendly diagnostics to help if TOML is malformed
           if not cur:
               print("[version-check] Could not read a valid version from current pyproject.toml.", file=sys.stderr)
-              # Print around line 15 to help debug when user saw an error there
               lines = cur_text.splitlines()
               for i in range(max(0,15-5), min(len(lines),15+5)):
                   print(f"[{i+1:03}] {lines[i]}", file=sys.stderr)
-
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={cur}\n")
               fh.write(f"prev_version={prev}\n")
@@ -125,9 +112,10 @@ jobs:
         shell: bash
         run: |
           cat > Dockerfile.ci <<'DOCKER'
-          ARG BASE
-          ARG CUDA_FROM
-          FROM ${CUDA_FROM} as cuda
+          ARG BASE=quay.io/pypa/manylinux_2_28_x86_64:latest
+          ARG CUDA_FROM=nvidia/cuda:12.4.1-devel-rockylinux8
+
+          FROM ${CUDA_FROM} AS cuda
           # provides /usr/local/cuda
 
           FROM ${BASE}
@@ -137,13 +125,22 @@ jobs:
            || (dnf -y install git && dnf clean all || true)
           # copy CUDA to neutral prefix
           COPY --from=cuda /usr/local/cuda /opt/cuda
-          ENV PATH="/opt/cuda/bin:${PATH}" CUDA_HOME="/opt/cuda"
+          ENV PATH="/opt/cuda/bin:${PATH}" CUDA_HOME="/opt/cuda" CUDA_PATH="/opt/cuda"
           DOCKER
-          docker build \
+
+          # Retry docker build to ride out transient 50x from registries
+          tries=0
+          until docker build \
             --build-arg BASE=${{ matrix.ml_image.base }} \
             --build-arg CUDA_FROM=${{ matrix.ml_image.cuda_from }} \
             -t ${{ matrix.ml_image.tag }} \
-            -f Dockerfile.ci .
+            -f Dockerfile.ci .; do
+            rc=$?
+            tries=$((tries+1))
+            if [ $tries -ge 5 ]; then exit $rc; fi
+            echo "docker build failed (rc=$rc). Retrying in $((5*tries))s ($tries/5)…"
+            sleep $((5*tries))
+          done
 
       - name: Install cibuildwheel & build tools
         run: |
@@ -162,6 +159,31 @@ jobs:
           CIBW_BUILD: ${{ env.PYTHON_BUILD_PATS }}
           # Skip PyPy and musllinux in this CUDA workflow
           CIBW_SKIP: "pp* *-musllinux_*"
+
+          # Install a CUDA-supported host compiler in the container (no CMake edits)
+          CIBW_BEFORE_ALL_LINUX: >
+            bash -lc '
+              set -e
+              # manylinux2014 (CentOS 7): devtoolset-11 ~ GCC 11 (supported by CUDA 12.4)
+              if command -v yum >/dev/null 2>&1; then
+                yum -y install centos-release-scl || true
+                yum -y install devtoolset-11-gcc devtoolset-11-gcc-c++ || true
+                if [ -x /opt/rh/devtoolset-11/root/usr/bin/gcc ]; then
+                  ln -sf /opt/rh/devtoolset-11/root/usr/bin/gcc /usr/local/bin/gcc
+                  ln -sf /opt/rh/devtoolset-11/root/usr/bin/g++ /usr/local/bin/g++
+                fi
+              fi
+              # manylinux_2_28 (Rocky/Alma 8): prefer gcc-toolset-13
+              if command -v dnf >/dev/null 2>&1 || command -v microdnf >/dev/null 2>&1; then
+                (dnf -y install gcc-toolset-13-gcc gcc-toolset-13-g++ || microdnf -y install gcc-toolset-13-gcc gcc-toolset-13-g++ || true)
+                if [ -x /opt/rh/gcc-toolset-13/root/usr/bin/gcc ]; then
+                  ln -sf /opt/rh/gcc-toolset-13/root/usr/bin/gcc /usr/local/bin/gcc
+                  ln -sf /opt/rh/gcc-toolset-13/root/usr/bin/g++ /usr/local/bin/g++
+                fi
+              fi
+              gcc --version || true
+            '
+
           # Ensure build deps are available inside the container's PEP 517 env
           CIBW_BEFORE_BUILD: >
             git submodule update --init --recursive || true
@@ -170,8 +192,9 @@ jobs:
             ninja>=1.11
             scikit-build-core>=0.10
             pybind11>=2.12
+
           # CUDA discovery + both lib paths (CUDA 12 layout) + exact nvcc path + arches
-          # Also inject PATH and NVCC so your ExternalProject's configure.sh sees nvcc
+          # Also provide host compiler selection (no CMake edits) and safe NVCC fallback flag
           CIBW_ENVIRONMENT: >
             CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release
                         -DSKBUILD_BUILD_VERBOSE=1
@@ -180,7 +203,8 @@ jobs:
                         -DCMAKE_CUDA_ARCHITECTURES=70;75;80;86
                         -DGASAL2_CUDA_HOME=/opt/cuda
                         -DCUDAToolkit_ROOT=/opt/cuda
-                        -DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda"
+                        -DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda
+                        -DCMAKE_CUDA_HOST_COMPILER=/usr/local/bin/gcc"
             PATH=/opt/cuda/bin:$PATH
             NVCC=/opt/cuda/bin/nvcc
             CUDA_HOME=/opt/cuda
@@ -188,8 +212,13 @@ jobs:
             CMAKE_PREFIX_PATH=/opt/cuda
             LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
             SKBUILD_CMAKE_BUILD_PARALLEL_LEVEL=2
+            CC=/usr/local/bin/gcc
+            CXX=/usr/local/bin/g++
+            NVCCFLAGS="-Xcompiler -fPIC -allow-unsupported-compiler"
+
           # Be verbose so failures provide CMake diagnostics
           CIBW_BUILD_VERBOSITY: "3"
+
           # Ensure auditwheel sees libcudart in the repair phase (prefix with LD_LIBRARY_PATH)
           CIBW_REPAIR_WHEEL_COMMAND: >
             bash -lc 'export LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH;
@@ -199,7 +228,6 @@ jobs:
           python -m cibuildwheel --output-dir wheelhouse || true
 
       - name: Build sdist
-        # sdist is independent; keep it even if some wheels failed
         run: |
           python -m build --sdist --outdir dist
 

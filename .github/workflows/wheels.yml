@@ -3,7 +3,6 @@ name: Build & Release Wheels (CUDA manylinux)
 on:
   push:
     branches: [ main ]
-    tags: [ "v*" ]
     paths:
       - "pyproject.toml"
       - "src/**"
@@ -38,88 +37,47 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Read version (dynamic/tag-aware)
+      - name: Read current version from pyproject.toml (tolerant)
         id: vout
         shell: bash
         run: |
-          set -euo pipefail
           python - <<'PY'
-          import os, sys, subprocess, pathlib, re, tempfile, shutil
-
-          def tag_version():
-              ref_type = os.environ.get("GITHUB_REF_TYPE", "")
-              ref_name = os.environ.get("GITHUB_REF_NAME", "")
-              if ref_type == "tag" and ref_name.startswith("v") and len(ref_name) > 1:
-                  return ref_name[1:]
-              return ""
-
-          def version_from_setuptools_scm():
+          import os, re, subprocess, pathlib, sys
+          def parse_version_tolerant(text: str) -> str:
               try:
-                  import subprocess, json
-                  # Use Python to import setuptools_scm if declared
-                  out = subprocess.check_output([sys.executable, "-c",
-                    "import setuptools_scm; print(setuptools_scm.get_version())"], text=True)
-                  v = out.strip()
-                  # Normalize possible local versions (e.g., +gHASH) to PEP440; keep as-is
-                  return v if v else ""
+                  import tomllib
+                  data = tomllib.loads(text)
+                  v = (data.get("project") or {}).get("version")
+                  if isinstance(v, str) and v.strip():
+                      return v.strip()
+              except Exception as e:
+                  print(f"[version-check] tomllib parse failed: {e}", file=sys.stderr)
+              m = re.search(r'(?mi)^\s*version\s*=\s*"(.*?)"\s*$', text)
+              if m:
+                  cand = m.group(1).strip()
+                  if cand:
+                      return cand
+              return ""
+          def read_prev_pyproject() -> str:
+              try:
+                  b = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
+                  return b.decode("utf-8", "replace")
               except Exception:
                   return ""
-
-          def version_from_sdist():
-              # Build sdist only; parse name-version.tar.gz
-              tmp = tempfile.mkdtemp(prefix="sdist_meta_")
-              try:
-                  subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "build"], stdout=sys.stderr)
-                  subprocess.check_call([sys.executable, "-m", "build", "--sdist", "--outdir", tmp], stdout=sys.stderr)
-                  files = list(pathlib.Path(tmp).glob("*.tar.gz"))
-                  if not files:
-                      return ""
-                  name = files[0].name
-                  # name looks like: package-1.2.3.tar.gz
-                  m = re.match(r"^.+-(?P<ver>[^-]+)\.tar\.gz$", name)
-                  return m.group("ver") if m else ""
-              finally:
-                  shutil.rmtree(tmp, ignore_errors=True)
-
-          # 1) Prefer tag if this is a tag build
-          ver = tag_version()
-          source = "tag"
-
-          # 2) Otherwise, try setuptools_scm (dynamic version)
-          if not ver:
-              ver = version_from_setuptools_scm()
-              source = "setuptools_scm" if ver else ""
-
-          # 3) Fallback: build sdist to read Version from filename
-          if not ver:
-              ver = version_from_sdist()
-              source = "sdist" if ver else ""
-
-          if not ver:
-              print("[version-check] Could not determine version (no tag, setuptools_scm, or sdist).", file=sys.stderr)
-              # keep going with changed=false so downstream jobs can still build without releasing
-
-          # Decide `changed`: if we have a version and no remote tag v<version> exists, we plan a release.
-          changed = "false"
-          if ver:
-              # Check if tag exists remotely
-              try:
-                  out = subprocess.check_output(["git", "ls-remote", "--tags", "origin", f"refs/tags/v{ver}"], text=True)
-                  changed = "false" if out.strip() else "true"
-              except Exception:
-                  # If check fails, be conservative: allow release
-                  changed = "true"
-
-          # If this run is itself on a tag ref, treat as changed (we are releasing that tag)
-          if os.environ.get("GITHUB_REF_TYPE") == "tag":
-              changed = "true"
-
+          cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8", errors="replace")
+          prev_text = read_prev_pyproject()
+          cur = parse_version_tolerant(cur_text)
+          prev = parse_version_tolerant(prev_text) if prev_text else ""
+          changed = "true" if (cur and cur != prev) else "false"
+          if not cur:
+              print("[version-check] Could not read a valid version from current pyproject.toml.", file=sys.stderr)
+              lines = cur_text.splitlines()
+              for i in range(max(0,15-5), min(len(lines),15+5)):
+                  print(f"[{i+1:03}] {lines[i]}", file=sys.stderr)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"version={ver}\n")
-              fh.write(f"prev_version=\n")
+              fh.write(f"version={cur}\n")
+              fh.write(f"prev_version={prev}\n")
               fh.write(f"changed={changed}\n")
-
-          print(f"[version-check] version={ver or '(unknown)'} source={source or '(none)'} changed={changed}", file=sys.stderr)
           PY
 
   build-linux:
@@ -195,18 +153,12 @@ jobs:
 
       - name: Build wheels with cibuildwheel on ${{ matrix.ml_image.kind }} (continue on error)
         env:
-          # Limit to x86_64 on Linux
           CIBW_ARCHS_LINUX: x86_64
-          # Build the selected CPython versions
           CIBW_BUILD: ${{ env.PYTHON_BUILD_PATS }}
-          # Skip PyPy and musllinux in this CUDA workflow
           CIBW_SKIP: "pp* *-musllinux_*"
-
-          # Install a CUDA-supported host compiler in the container (no CMake edits)
           CIBW_BEFORE_ALL_LINUX: >
             bash -lc '
               set -e
-              # manylinux2014 (CentOS 7): devtoolset-11 ~ GCC 11 (supported by CUDA 12.4)
               if command -v yum >/dev/null 2>&1; then
                 yum -y install centos-release-scl || true
                 yum -y install devtoolset-11-gcc devtoolset-11-gcc-c++ || true
@@ -215,7 +167,6 @@ jobs:
                   ln -sf /opt/rh/devtoolset-11/root/usr/bin/g++ /usr/local/bin/g++
                 fi
               fi
-              # manylinux_2_28 (Rocky/Alma 8): prefer gcc-toolset-13
               if command -v dnf >/dev/null 2>&1 || command -v microdnf >/dev/null 2>&1; then
                 (dnf -y install gcc-toolset-13-gcc gcc-toolset-13-g++ || microdnf -y install gcc-toolset-13-gcc gcc-toolset-13-g++ || true)
                 if [ -x /opt/rh/gcc-toolset-13/root/usr/bin/gcc ]; then
@@ -225,8 +176,6 @@ jobs:
               fi
               gcc --version || true
             '
-
-          # Ensure build deps are available inside the container's PEP 517 env
           CIBW_BEFORE_BUILD: >
             git submodule update --init --recursive || true
             && python -m pip install -U pip
@@ -234,9 +183,6 @@ jobs:
             ninja>=1.11
             scikit-build-core>=0.10
             pybind11>=2.12
-
-          # CUDA discovery + both lib paths (CUDA 12 layout) + exact nvcc path + arches
-          # Also provide host compiler selection (no CMake edits) and safe NVCC fallback flag
           CIBW_ENVIRONMENT: >
             CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release
                         -DSKBUILD_BUILD_VERBOSE=1
@@ -257,16 +203,11 @@ jobs:
             CC=/usr/local/bin/gcc
             CXX=/usr/local/bin/g++
             NVCCFLAGS="-Xcompiler -fPIC -allow-unsupported-compiler"
-
-          # Be verbose so failures provide CMake diagnostics
           CIBW_BUILD_VERBOSITY: "3"
-
-          # Ensure auditwheel sees libcudart in the repair phase (prefix with LD_LIBRARY_PATH)
           CIBW_REPAIR_WHEEL_COMMAND: >
             bash -lc 'export LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH;
                       auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1'
         run: |
-          # Don't fail the step if some wheels fail; upload whatever was built
           python -m cibuildwheel --output-dir wheelhouse || true
 
       - name: Build sdist
@@ -328,7 +269,7 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: release
-    if: needs.version-check.outputs.changed == 'true'
+    if: needs.version-check.outputs.changed == 'false'
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -342,19 +283,89 @@ jobs:
             echo "No dists to publish; exiting gracefully"; exit 0
           fi
 
+      # NEW: Verify sdist present (we require at least one wheel AND an sdist)
+      - name: Require sdist and at least one wheel
+        run: |
+          shopt -s nullglob
+          wheels=(to-publish/*.whl)
+          sdists=(to-publish/*.tar.gz)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "No wheel built; abort publish."; exit 1
+          fi
+          if [ ${#sdists[@]} -eq 0 ]; then
+            echo "No sdist built; abort publish."; exit 1
+          fi
+
+      # NEW: Verify all filenames embed the expected version
+      - name: Ensure artifacts version matches pyproject version
+        run: |
+          ver="${{ needs.version-check.outputs.version }}"
+          echo "Expecting version: $ver"
+          mismatched=0
+          for f in to-publish/*; do
+            case "$f" in
+              *.whl)
+                # wheel: pkgname-version-... .whl
+                fv=$(basename "$f" | sed -E 's/^[^-]+-([0-9][^-]*)-.+\.whl$/\1/')
+                ;;
+              *.tar.gz)
+                # sdist: pkgname-version.tar.gz
+                fv=$(basename "$f" | sed -E 's/^[^-]+-([0-9].*)\.tar\.gz$/\1/')
+                ;;
+              *) continue ;;
+            esac
+            if [ "$fv" != "$ver" ]; then
+              echo "Version mismatch: $f -> $fv (expected $ver)"
+              mismatched=1
+            fi
+          done
+          if [ $mismatched -ne 0 ]; then
+            echo "Artifact version mismatch; aborting publish."; exit 1
+          fi
+
+      # NEW: Validate metadata and wheels
+      - name: Twine check
+        run: |
+          python -m pip install -U pip
+          python -m pip install twine
+          python -m twine check to-publish/*
+
+      # NEW: Skip if the version already exists on PyPI
+      - name: Skip if version already on PyPI
+        id: pypi_exists
+        run: |
+          set -e
+          PKG="${{ env.PACKAGE_NAME }}"
+          VER="${{ needs.version-check.outputs.version }}"
+          echo "Checking PyPI for $PKG==$VER"
+          code=$(curl -s -o /tmp/pypi.json -w "%{http_code}" "https://pypi.org/pypi/${PKG}/json" || true)
+          if [ "$code" != "200" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python - <<'PY'
+import json, os, sys
+data = json.load(open("/tmp/pypi.json"))
+ver = os.environ["VER"]
+exists = ver in data.get("releases", {})
+print("exists =", exists)
+open(os.environ["GITHUB_OUTPUT"], "a").write(f"exists={'true' if exists else 'false'}\n")
+PY
+        env:
+          VER: ${{ needs.version-check.outputs.version }}
+
       - name: Publish (if token present)
+        if: ${{ steps.pypi_exists.outputs.exists != 'true' }}
         env:
           PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        if: ${{ env.PYPI_API_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@v1.12.2
         with:
           password: ${{ env.PYPI_API_TOKEN }}
           packages_dir: to-publish
           skip_existing: true
 
-      - name: Skip publish (no PYPI_API_TOKEN)
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        if: ${{ env.PYPI_API_TOKEN == '' }}
-        run: echo "PYPI_API_TOKEN not set; skipping PyPI publish."
+      - name: Skip publish (already on PyPI or no token)
+        if: ${{ steps.pypi_exists.outputs.exists == 'true' || env.PYPI_API_TOKEN == '' }}
+        run: |
+          echo "Skipping publish: version exists on PyPI or PYPI_API_TOKEN not set."
 

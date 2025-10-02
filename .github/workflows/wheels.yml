@@ -1,332 +1,178 @@
-name: Build & Release Wheels (CUDA manylinux)
+name: Build & Release Wheels (CUDA matrix, manylinux/macos/windows)
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - "pyproject.toml"
-      - "src/**"
-      - "CMakeLists.txt"
-      - "cmake/**"
-      - ".github/workflows/wheels.yml"
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
 
 env:
-  PACKAGE_NAME: gasal2_py
-  # Build these CPython versions (linux x86_64)
-  PYTHON_BUILD_PATS: "cp39-* cp310-* cp311-* cp312-*"
+  PACKAGE_NAME: your_package_name
+  CIBW_BUILD_VERBOSITY: 1
+  CIBW_TEST_COMMAND: "python -c \"import your_package_name as m; print(m.__version__)\""
+  CIBW_SKIP: "cp36-* pp*"
+  CIBW_PRERELEASE_PYTHONS: "False"
 
 jobs:
   version-check:
-    name: Detect version change
+    name: Extract version from tag
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.vout.outputs.version }}
-      prev_version: ${{ steps.vout.outputs.prev_version }}
-      changed: ${{ steps.vout.outputs.changed }}
+      version: ${{ steps.getver.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Setup Python (for tomllib)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Read current version from pyproject.toml (tolerant)
-        id: vout
-        shell: bash
+      - name: Get version
+        id: getver
         run: |
-          python - <<'PY'
-          import os, re, subprocess, pathlib, sys
-          def parse_version_tolerant(text: str) -> str:
-              try:
-                  import tomllib
-                  data = tomllib.loads(text)
-                  v = (data.get("project") or {}).get("version")
-                  if isinstance(v, str) and v.strip():
-                      return v.strip()
-              except Exception as e:
-                  print(f"[version-check] tomllib parse failed: {e}", file=sys.stderr)
-              m = re.search(r'(?mi)^\s*version\s*=\s*"(.*?)"\s*$', text)
-              if m:
-                  cand = m.group(1).strip()
-                  if cand:
-                      return cand
-              return ""
-          def read_prev_pyproject() -> str:
-              try:
-                  b = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
-                  return b.decode("utf-8", "replace")
-              except Exception:
-                  return ""
-          cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8", errors="replace")
-          prev_text = read_prev_pyproject()
-          cur = parse_version_tolerant(cur_text)
-          prev = parse_version_tolerant(prev_text) if prev_text else ""
-          changed = "true" if (cur and cur != prev) else "false"
-          if not cur:
-              print("[version-check] Could not read a valid version from current pyproject.toml.", file=sys.stderr)
-              lines = cur_text.splitlines()
-              for i in range(max(0,15-5), min(len(lines),15+5)):
-                  print(f"[{i+1:03}] {lines[i]}", file=sys.stderr)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"version={cur}\n")
-              fh.write(f"prev_version={prev}\n")
-              fh.write(f"changed={changed}\n")
-          PY
+          # Expect tags like v1.2.3
+          if [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${GITHUB_REF_NAME} is not semver-like (vX.Y.Z)"; exit 1
+          fi
+      - name: Show version
+        run: echo "Version is ${{ steps.getver.outputs.version }}"
 
-  build-linux:
-    name: Build manylinux wheels (CUDA)
-    runs-on: ubuntu-latest
+  linux-wheels:
+    name: Linux wheels (manylinux)
     needs: version-check
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        ml_image:
-          - kind: manylinux2014
-            tag: "gasal2-manylinux2014-cuda:12.4.0"
-            base: "quay.io/pypa/manylinux2014_x86_64"
-            cuda_from: "nvidia/cuda:12.4.0-devel-centos7"
-            env_var: "CIBW_MANYLINUX_X86_64_IMAGE"
-          - kind: manylinux_2_28
-            tag: "gasal2-manylinux_2_28-cuda:12.4.1"
-            base: "quay.io/pypa/manylinux_2_28_x86_64"
-            cuda_from: "nvidia/cuda:12.4.1-devel-rockylinux8"
-            env_var: "CIBW_MANYLINUX_2_28_X86_64_IMAGE"
+        python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: false   # external deps handled by your CMake ExternalProject
 
-      - name: Set up Python for helper tooling
+      - name: Set up Python for cibuildwheel
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Build custom CUDA-enabled manylinux image (${{ matrix.ml_image.kind }})
-        shell: bash
-        run: |
-          cat > Dockerfile.ci <<'DOCKER'
-          ARG BASE=quay.io/pypa/manylinux_2_28_x86_64:latest
-          ARG CUDA_FROM=nvidia/cuda:12.4.1-devel-rockylinux8
-
-          FROM ${CUDA_FROM} AS cuda
-          # provides /usr/local/cuda
-
-          FROM ${BASE}
-          # minimal tools; pkg manager differs per base
-          RUN yum -y install git && yum clean all || true \
-           || (microdnf -y install git && microdnf clean all || true) \
-           || (dnf -y install git && dnf clean all || true)
-          # copy CUDA to neutral prefix
-          COPY --from=cuda /usr/local/cuda /opt/cuda
-          ENV PATH="/opt/cuda/bin:${PATH}" CUDA_HOME="/opt/cuda" CUDA_PATH="/opt/cuda"
-          DOCKER
-
-          # Retry docker build to ride out transient 50x from registries
-          tries=0
-          until docker build \
-            --build-arg BASE=${{ matrix.ml_image.base }} \
-            --build-arg CUDA_FROM=${{ matrix.ml_image.cuda_from }} \
-            -t ${{ matrix.ml_image.tag }} \
-            -f Dockerfile.ci .; do
-            rc=$?
-            tries=$((tries+1))
-            if [ $tries -ge 5 ]; then exit $rc; fi
-            echo "docker build failed (rc=$rc). Retrying in $((5*tries))s ($tries/5)…"
-            sleep $((5*tries))
-          done
-
-      - name: Install cibuildwheel & build tools
-        run: |
-          python -m pip install -U pip
-          python -m pip install "cibuildwheel>=2.20" build
-
-      - name: Select image override env var for cibuildwheel
-        run: |
-          echo "${{ matrix.ml_image.env_var }}=${{ matrix.ml_image.tag }}" >> "$GITHUB_ENV"
-
-      - name: Build wheels with cibuildwheel on ${{ matrix.ml_image.kind }} (continue on error)
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.20.0
         env:
-          CIBW_ARCHS_LINUX: x86_64
-          CIBW_BUILD: ${{ env.PYTHON_BUILD_PATS }}
-          CIBW_SKIP: "pp* *-musllinux_*"
-          CIBW_BEFORE_ALL_LINUX: >
-            bash -lc '
-              set -e
-              if command -v yum >/dev/null 2>&1; then
-                yum -y install centos-release-scl || true
-                yum -y install devtoolset-11-gcc devtoolset-11-gcc-c++ || true
-                if [ -x /opt/rh/devtoolset-11/root/usr/bin/gcc ]; then
-                  ln -sf /opt/rh/devtoolset-11/root/usr/bin/gcc /usr/local/bin/gcc
-                  ln -sf /opt/rh/devtoolset-11/root/usr/bin/g++ /usr/local/bin/g++
-                fi
-              fi
-              if command -v dnf >/dev/null 2>&1 || command -v microdnf >/dev/null 2>&1; then
-                (dnf -y install gcc-toolset-13-gcc gcc-toolset-13-g++ || microdnf -y install gcc-toolset-13-gcc gcc-toolset-13-g++ || true)
-                if [ -x /opt/rh/gcc-toolset-13/root/usr/bin/gcc ]; then
-                  ln -sf /opt/rh/gcc-toolset-13/root/usr/bin/gcc /usr/local/bin/gcc
-                  ln -sf /opt/rh/gcc-toolset-13/root/usr/bin/g++ /usr/local/bin/g++
-                fi
-              fi
-              gcc --version || true
-            '
-          CIBW_BEFORE_BUILD: >
-            git submodule update --init --recursive || true
-            && python -m pip install -U pip
-            cmake>=3.27
-            ninja>=1.11
-            scikit-build-core>=0.10
-            pybind11>=2.12
-          CIBW_ENVIRONMENT: >
-            CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release
-                        -DSKBUILD_BUILD_VERBOSE=1
-                        -DCMAKE_VERBOSE_MAKEFILE=ON
-                        -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc
-                        -DCMAKE_CUDA_ARCHITECTURES=70;75;80;86
-                        -DGASAL2_CUDA_HOME=/opt/cuda
-                        -DCUDAToolkit_ROOT=/opt/cuda
-                        -DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda
-                        -DCMAKE_CUDA_HOST_COMPILER=/usr/local/bin/gcc"
-            PATH=/opt/cuda/bin:$PATH
-            NVCC=/opt/cuda/bin/nvcc
-            CUDA_HOME=/opt/cuda
-            CUDA_PATH=/opt/cuda
-            CMAKE_PREFIX_PATH=/opt/cuda
-            LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
-            SKBUILD_CMAKE_BUILD_PARALLEL_LEVEL=2
-            CC=/usr/local/bin/gcc
-            CXX=/usr/local/bin/g++
-            NVCCFLAGS="-Xcompiler -fPIC -allow-unsupported-compiler"
-          CIBW_BUILD_VERBOSITY: "3"
-          CIBW_REPAIR_WHEEL_COMMAND: >
-            bash -lc 'export LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH;
-                      auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1'
-        run: |
-          python -m cibuildwheel --output-dir wheelhouse || true
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ENVIRONMENT: |
+            PACKAGE_VERSION=${{ needs.version-check.outputs.version }}
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux2014
+        with:
+          output-dir: wheelhouse
+
+      - name: Upload wheels (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-wheels
+          path: wheelhouse/*.whl
+
+  macos-wheels:
+    name: macOS wheels (x86_64 + arm64)
+    needs: version-check
+    runs-on: macos-13
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ["x86_64", "arm64"]
+        python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python for cibuildwheel
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.20.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ARCHS_MACOS: ${{ matrix.arch }}
+          CIBW_ENVIRONMENT: |
+            PACKAGE_VERSION=${{ needs.version-check.outputs.version }}
+        with:
+          output-dir: wheelhouse
+
+      - name: Upload wheels (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-wheels
+          path: wheelhouse/*.whl
+
+  windows-wheels:
+    name: Windows wheels
+    needs: version-check
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python for cibuildwheel
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.20.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ENVIRONMENT: |
+            PACKAGE_VERSION=${{ needs.version-check.outputs.version }}
+        with:
+          output-dir: wheelhouse
+
+      - name: Upload wheels (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wheels
+          path: wheelhouse/*.whl
+
+  sdist:
+    name: Source distribution
+    needs: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Build sdist
         run: |
+          python -m pip install --upgrade build
           python -m build --sdist --outdir dist
-
-      - name: Upload artifacts (whatever succeeded)
+      - name: Upload sdist (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: linux-wheels-${{ matrix.ml_image.kind }}
-          path: |
-            wheelhouse/*.whl
-            dist/*.tar.gz
-          if-no-files-found: ignore
+          name: sdist
+          path: dist/*.tar.gz
 
-  release:
-    name: Create GitHub Release if version changed
+  collect:
+    name: Collect all artifacts
+    needs: [linux-wheels, macos-wheels, windows-wheels, sdist]
     runs-on: ubuntu-latest
-    needs: [version-check, build-linux]
-    if: needs.version-check.outputs.changed == 'true'
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
+          path: to-publish
 
-      - name: Flatten artifacts for release/publish
+      - name: Flatten artifact tree
         run: |
-          mkdir -p to-release
-          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-release/ \; || true
-          ls -l to-release || true
+          shopt -s globstar nullglob
+          mkdir -p to-publish-flat
+          mv to-publish/**/*.{whl,tar.gz} to-publish-flat/ || true
+          rmdir -p to-publish 2>/dev/null || true
+          mv to-publish-flat to-publish
+          ls -l to-publish
 
-      - name: Ensure we have at least one file
-        run: |
-          if ! ls to-release/* >/dev/null 2>&1; then
-            echo "No distributions built; skipping tag/release"; exit 0
-          fi
-
-      - name: Create tag if missing
-        run: |
-          git fetch --tags || true
-          if git rev-parse "v${{ needs.version-check.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag v${{ needs.version-check.outputs.version }} already exists; continuing."
-          else
-            git tag "v${{ needs.version-check.outputs.version }}"
-            git push origin "v${{ needs.version-check.outputs.version }}"
-          fi
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.version-check.outputs.version }}
-          name: GASAL2-Py v${{ needs.version-check.outputs.version }}
-          body: |
-            CUDA-enabled manylinux wheels (2014 & 2_28).
-            Built from commit ${{ github.sha }}.
-          files: to-release/*
-
-  publish-pypi:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    needs: release
-    if: needs.version-check.outputs.changed == 'false'
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: ./artifacts
-
-      - name: Collect distributions
-        run: |
-          mkdir -p to-publish
-          find artifacts -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp {} to-publish/ \; || true
-          if ! ls to-publish/* >/dev/null 2>&1; then
-            echo "No dists to publish; exiting gracefully"; exit 0
-          fi
-
-      # NEW: Verify sdist present (we require at least one wheel AND an sdist)
-      - name: Require sdist and at least one wheel
-        run: |
-          shopt -s nullglob
-          wheels=(to-publish/*.whl)
-          sdists=(to-publish/*.tar.gz)
-          if [ ${#wheels[@]} -eq 0 ]; then
-            echo "No wheel built; abort publish."; exit 1
-          fi
-          if [ ${#sdists[@]} -eq 0 ]; then
-            echo "No sdist built; abort publish."; exit 1
-          fi
-
-      # NEW: Verify all filenames embed the expected version
-      - name: Ensure artifacts version matches pyproject version
-        run: |
-          ver="${{ needs.version-check.outputs.version }}"
-          echo "Expecting version: $ver"
-          mismatched=0
-          for f in to-publish/*; do
-            case "$f" in
-              *.whl)
-                # wheel: pkgname-version-... .whl
-                fv=$(basename "$f" | sed -E 's/^[^-]+-([0-9][^-]*)-.+\.whl$/\1/')
-                ;;
-              *.tar.gz)
-                # sdist: pkgname-version.tar.gz
-                fv=$(basename "$f" | sed -E 's/^[^-]+-([0-9].*)\.tar\.gz$/\1/')
-                ;;
-              *) continue ;;
-            esac
-            if [ "$fv" != "$ver" ]; then
-              echo "Version mismatch: $f -> $fv (expected $ver)"
-              mismatched=1
-            fi
-          done
-          if [ $mismatched -ne 0 ]; then
-            echo "Artifact version mismatch; aborting publish."; exit 1
-          fi
-
-      # NEW: Validate metadata and wheels
       - name: Twine check
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           python -m pip install twine
           python -m twine check to-publish/*
 
@@ -344,13 +190,13 @@ jobs:
             exit 0
           fi
           python - <<'PY'
-import json, os, sys
-data = json.load(open("/tmp/pypi.json"))
-ver = os.environ["VER"]
-exists = ver in data.get("releases", {})
-print("exists =", exists)
-open(os.environ["GITHUB_OUTPUT"], "a").write(f"exists={'true' if exists else 'false'}\n")
-PY
+            import json, os, sys
+            data = json.load(open("/tmp/pypi.json"))
+            ver = os.environ["VER"]
+            exists = ver in data.get("releases", {})
+            print("exists =", exists)
+            open(os.environ["GITHUB_OUTPUT"], "a").write(f"exists={'true' if exists else 'false'}\n")
+          PY
         env:
           VER: ${{ needs.version-check.outputs.version }}
 

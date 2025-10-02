@@ -9,7 +9,10 @@ on:
       - "CMakeLists.txt"
       - "cmake/**"
       - ".github/workflows/wheels.yml"
+
   workflow_dispatch: {}
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -20,83 +23,9 @@ env:
   PYTHON_BUILD_PATS: "cp39-* cp310-* cp311-* cp312-*"
 
 jobs:
-  version-check:
-    name: Detect version change
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.vout.outputs.version }}
-      prev_version: ${{ steps.vout.outputs.prev_version }}
-      changed: ${{ steps.vout.outputs.changed }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Setup Python (for tomllib)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Read current version from pyproject.toml (tolerant)
-        id: vout
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os, re, subprocess, pathlib, sys
-          def parse_version_tolerant(text: str) -> str:
-              # First try tomllib
-              try:
-                  import tomllib
-                  data = tomllib.loads(text)
-                  v = (data.get("project") or {}).get("version")
-                  if isinstance(v, str) and v.strip():
-                      return v.strip()
-              except Exception as e:
-                  # Show a small diagnostic (non-fatal)
-                  print(f"[version-check] tomllib parse failed: {e}", file=sys.stderr)
-
-              # Fallback: regex — first version="x.y.z" under [project] or anywhere
-              # This keeps things running even if TOML has a trailing comma or comments.
-              m = re.search(r'(?mi)^\s*version\s*=\s*"(.*?)"\s*$', text)
-              if m:
-                  cand = m.group(1).strip()
-                  if cand:
-                      return cand
-              return ""
-
-          def read_prev_pyproject() -> str:
-              try:
-                  b = subprocess.check_output(["git","show","HEAD^:pyproject.toml"])
-                  return b.decode("utf-8", "replace")
-              except Exception:
-                  return ""
-
-          cur_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8", errors="replace")
-          prev_text = read_prev_pyproject()
-
-          cur = parse_version_tolerant(cur_text)
-          prev = parse_version_tolerant(prev_text) if prev_text else ""
-
-          changed = "true" if (cur and cur != prev) else "false"
-
-          # Friendly diagnostics to help if TOML is malformed
-          if not cur:
-              print("[version-check] Could not read a valid version from current pyproject.toml.", file=sys.stderr)
-              # Print around line 15 to help debug when user saw an error there
-              lines = cur_text.splitlines()
-              for i in range(max(0,15-5), min(len(lines),15+5)):
-                  print(f"[{i+1:03}] {lines[i]}", file=sys.stderr)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write(f"version={cur}\n")
-              fh.write(f"prev_version={prev}\n")
-              fh.write(f"changed={changed}\n")
-          PY
-
   build-linux:
     name: Build manylinux wheels (CUDA)
     runs-on: ubuntu-latest
-    needs: version-check
     strategy:
       fail-fast: false
       matrix:
@@ -114,6 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # For setuptools-scm during tag builds, fetch full history and tags.
+          fetch-depth: 0
           submodules: false   # external deps handled by your CMake ExternalProject
 
       - name: Set up Python for helper tooling
@@ -131,7 +62,7 @@ jobs:
           # provides /usr/local/cuda
 
           FROM ${BASE}
-          # minimal tools; pkg manager differs per base
+          # minimal tools; package manager differs per base
           RUN yum -y install git && yum clean all || true \
            || (microdnf -y install git && microdnf clean all || true) \
            || (dnf -y install git && dnf clean all || true)
@@ -162,16 +93,11 @@ jobs:
           CIBW_BUILD: ${{ env.PYTHON_BUILD_PATS }}
           # Skip PyPy and musllinux in this CUDA workflow
           CIBW_SKIP: "pp* *-musllinux_*"
-          # Ensure build deps are available inside the container's PEP 517 env
+          # Ensure build deps are available inside the PEP 517 env
           CIBW_BEFORE_BUILD: >
-            git submodule update --init --recursive || true
-            && python -m pip install -U pip
-            cmake>=3.27
-            ninja>=1.11
-            scikit-build-core>=0.10
-            pybind11>=2.12
-          # CUDA discovery + both lib paths (CUDA 12 layout) + exact nvcc path + arches
-          # Also inject PATH and NVCC so your ExternalProject's configure.sh sees nvcc
+            git submodule update --init --recursive || true &&
+            python -m pip install -U pip cmake>=3.27 ninja>=1.11 scikit-build-core>=0.10 pybind11>=2.12
+          # CUDA discovery + lib paths + nvcc path + arches
           CIBW_ENVIRONMENT: >
             CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release
                         -DSKBUILD_BUILD_VERBOSE=1
@@ -190,10 +116,12 @@ jobs:
             SKBUILD_CMAKE_BUILD_PARALLEL_LEVEL=2
           # Be verbose so failures provide CMake diagnostics
           CIBW_BUILD_VERBOSITY: "3"
-          # Ensure auditwheel sees libcudart in the repair phase (prefix with LD_LIBRARY_PATH)
+          # Ensure auditwheel sees libcudart in the repair phase
           CIBW_REPAIR_WHEEL_COMMAND: >
             bash -lc 'export LD_LIBRARY_PATH=/opt/cuda/lib64:/opt/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH;
                       auditwheel -v repair {wheel} -w {dest_dir} --exclude libcuda.so.1'
+          # Disable tests in CUDA builds by default; customize if you add GPU-capable tests
+          CIBW_TEST_SKIP: "*"
         run: |
           # Don't fail the step if some wheels fail; upload whatever was built
           python -m cibuildwheel --output-dir wheelhouse || true
@@ -206,20 +134,22 @@ jobs:
       - name: Upload artifacts (whatever succeeded)
         uses: actions/upload-artifact@v4
         with:
-          name: linux-wheels-${{ matrix.ml_image.kind }}
+          name: wheels-${{ matrix.ml_image.kind }}
           path: |
             wheelhouse/*.whl
             dist/*.tar.gz
           if-no-files-found: ignore
 
   release:
-    name: Create GitHub Release if version changed
+    name: Create GitHub Release (tag builds only)
     runs-on: ubuntu-latest
-    needs: [version-check, build-linux]
-    if: needs.version-check.outputs.changed == 'true'
+    needs: build-linux
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: wheels-*
+          merge-multiple: true
           path: ./artifacts
 
       - name: Flatten artifacts for release/publish
@@ -231,37 +161,29 @@ jobs:
       - name: Ensure we have at least one file
         run: |
           if ! ls to-release/* >/dev/null 2>&1; then
-            echo "No distributions built; skipping tag/release"; exit 0
-          fi
-
-      - name: Create tag if missing
-        run: |
-          git fetch --tags || true
-          if git rev-parse "v${{ needs.version-check.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag v${{ needs.version-check.outputs.version }} already exists; continuing."
-          else
-            git tag "v${{ needs.version-check.outputs.version }}"
-            git push origin "v${{ needs.version-check.outputs.version }}"
+            echo "No distributions built; skipping release"; exit 1
           fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.version-check.outputs.version }}
-          name: GASAL2-Py v${{ needs.version-check.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          name: GASAL2-Py ${{ github.ref_name }}
           body: |
             CUDA-enabled manylinux wheels (2014 & 2_28).
             Built from commit ${{ github.sha }}.
           files: to-release/*
 
   publish-pypi:
-    name: Publish to PyPI (optional)
+    name: Publish to PyPI (tag builds only)
     runs-on: ubuntu-latest
     needs: release
-    if: needs.version-check.outputs.changed == 'true'
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: wheels-*
+          merge-multiple: true
           path: ./artifacts
 
       - name: Collect distributions
@@ -272,6 +194,7 @@ jobs:
             echo "No dists to publish; exiting gracefully"; exit 0
           fi
 
+      # Option A: API token-based publish (keep this if you already use a token)
       - name: Publish (if token present)
         env:
           PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
@@ -281,10 +204,3 @@ jobs:
           password: ${{ env.PYPI_API_TOKEN }}
           packages_dir: to-publish
           skip_existing: true
-
-      - name: Skip publish (no PYPI_API_TOKEN)
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        if: ${{ env.PYPI_API_TOKEN == '' }}
-        run: echo "PYPI_API_TOKEN not set; skipping PyPI publish."
-

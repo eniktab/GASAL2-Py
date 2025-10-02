@@ -1,6 +1,6 @@
 ---
 title: GASAL2-Py — GASAL2 Python bindings (CUDA GPU)
-description: GASAL2-Py: official Python bindings for GASAL2 (CUDA GPU sequence alignment). If you searched for GASAL2 python or GASAL2-Py, this is the right project.
+description: GASAL2-Py: Python bindings for GASAL2 (CUDA GPU sequence alignment). If you searched for GASAL2 python or GASAL2-Py, this is the right project.
 ---
 
 # GASAL2-Py — GASAL2 Python bindings

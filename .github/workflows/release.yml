@@ -1,0 +1,93 @@
+name: Release (tag → PyPI)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write    # for PyPI Trusted Publishing
+  attestations: write
+
+jobs:
+  build-sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        run: |
+          python -m pip install -U build
+          python -m build --sdist --outdir dist
+          python -m pip install -U twine
+          python -m twine check dist/*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-wheels-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["cp39-manylinux_x86_64", "cp310-manylinux_x86_64", "cp311-manylinux_x86_64", "cp312-manylinux_x86_64"]
+    env:
+      # your CUDA manylinux image (as you already had)
+      CIBW_MANYLINUX_2_28_X86_64_IMAGE: gasal2-manylinux_2_28-cuda:12.4.1
+      CUDA_TOOLKIT_ROOT_DIR: /opt/cuda
+      # If your build reads these:
+      PACKAGE_NAME: gasal2_py
+      PYTHON_BUILD_PATS: cp39-* cp310-* cp311-* cp312-*
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_BUILD: ${{ matrix.py }}
+          # If you need to pass CMake args, prefer CIBW_ENVIRONMENT or tool-specific env vars
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    needs: [build-sdist, build-wheels-linux]
+    runs-on: ubuntu-latest
+    environment: pypi-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sdist
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      # Trusted Publishing to PyPI (no API token needed if project is configured)
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+

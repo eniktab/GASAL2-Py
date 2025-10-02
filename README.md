@@ -2,23 +2,19 @@
 
 [![DOI](https://zenodo.org/badge/1066128365.svg)](https://doi.org/10.5281/zenodo.17231489)
 
-**GASAL2-Py** is the  **Python** interface to **GASAL2**, a CUDA GPU library for DNA/RNA sequence alignment:  
-**Repo:** https://github.com/eniktab/GASAL2-Py
+**GASAL2-Py** is the  **Python** interface to **GASAL2**, a CUDA GPU library for DNA/RNA sequence alignment
 
 
 > **Description**  
 > This project provides Python bindings for **GASAL2** (GPU-accelerated sequence alignment).  
 > If the PyPI wheel does not work on your system, clone and **build from source** here: https://github.com/eniktab/GASAL2-Py
 
-> **Note on installation:** Because GASAL2 relies on NVIDIA CUDA libraries, **many users will need to build from source**. Prebuilt wheels on PyPI may not work on all systems (e.g., due to CUDA version/driver/toolkit mismatches or unsupported platform tags). Ensure you have a compatible CUDA Toolkit/driver installed and accessible on your build machine.
+> **Note on installation:** Because GASAL2 relies on NVIDIA CUDA libraries, **many users will need to build from source**. Prebuilt wheels on PyPI may not work on all systems. Ensure you have a compatible CUDA Toolkit/driver installed and accessible on your build machine.
 
 
+**GASAL2‑Py** provides Python bindings includes a minimal reproducible GASAL2 build (static + shared) **and** a high‑performance Pybind11 extension with double‑buffered CUDA streams and optional OpenMP post‑processing namely 
 
-**GASAL2‑Py** provides Python bindings and build helpers for **[GASAL2]**, a CUDA‑accelerated pairwise aligner.
-This repo includes a minimal reproducible GASAL2 build (static + shared) **and** a high‑performance Pybind11
-extension with double‑buffered CUDA streams and optional OpenMP post‑processing.
-
-> The provided code is include **asynchronous GPU
+> **asynchronous GPU
 > pipelining (ping‑pong buffering)**, correct **8‑byte ASCII buffer alignment** for H2D copies, and **OpenMP
 > parallelization** for host‑side CIGAR coalescing.
 
